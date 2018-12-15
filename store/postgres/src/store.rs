@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use graph::components::store::Store as StoreTrait;
 use graph::data::subgraph::schema::{
-    SubgraphManifestEntity, MANIFEST_ENTITY_TYPENAME, SUBGRAPHS_ID,
+    SubgraphManifestEntity, SUBGRAPHS_ID,
 };
 use graph::prelude::*;
 use graph::serde_json;
@@ -881,7 +881,7 @@ impl SubgraphDeploymentStore for Store {
             let manifest_entity = self
                 .get(EntityKey {
                     subgraph_id: SUBGRAPHS_ID.clone(),
-                    entity_type: MANIFEST_ENTITY_TYPENAME.to_owned(),
+                    entity_type: SubgraphManifestEntity::TYPENAME.to_owned(),
                     entity_id: SubgraphManifestEntity::id(&subgraph_id),
                 })?
                 .ok_or_else(|| format_err!("subgraph entity not found {}", subgraph_id))?;

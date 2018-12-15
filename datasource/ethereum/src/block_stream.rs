@@ -6,7 +6,7 @@ use std::mem;
 use std::sync::Mutex;
 
 use graph::components::forward;
-use graph::data::subgraph::schema::SubgraphEntity;
+use graph::data::subgraph::schema::SubgraphDeploymentEntity;
 use graph::prelude::{
     BlockStream as BlockStreamTrait, BlockStreamBuilder as BlockStreamBuilderTrait, *,
 };
@@ -552,8 +552,10 @@ where
             Ok(())
         } else {
             // Synced
-            let ops =
-                SubgraphEntity::write_status_operations(&self.subgraph_id, SubgraphStatus::Synced);
+            let ops = SubgraphDeploymentEntity::write_status_operations(
+                &self.subgraph_id,
+                SubgraphDeploymentStatus::Synced,
+            );
             self.subgraph_store
                 .apply_entity_operations(ops, EventSource::None)
         }
@@ -571,7 +573,7 @@ where
                 let processed = subgraph_ptr.number;
                 let total = head_ptr.number;
 
-                let ops = SubgraphEntity::write_ethereum_block_counts_operations(
+                let ops = SubgraphDeploymentEntity::write_ethereum_block_counts_operations(
                     &self.subgraph_id,
                     processed,
                     total,

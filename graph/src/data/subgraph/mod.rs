@@ -78,7 +78,7 @@ impl<'de> de::Deserialize<'de> for SubgraphId {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum SubgraphStatus {
+pub enum SubgraphDeploymentStatus {
     /// Initial state for new subgraphs. Valid next states are `Synced`, `Failed`, and `Paused`.
     ///
     /// Subgraphs stay in this state until they have caught up to the head block, at which point
@@ -103,13 +103,13 @@ pub enum SubgraphStatus {
     Paused,
 }
 
-impl fmt::Display for SubgraphStatus {
+impl fmt::Display for SubgraphDeploymentStatus {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            SubgraphStatus::Syncing => write!(f, "SYNCING"),
-            SubgraphStatus::Synced => write!(f, "SYNCED"),
-            SubgraphStatus::Failed => write!(f, "FAILED"),
-            SubgraphStatus::Paused => write!(f, "PAUSED"),
+            SubgraphDeploymentStatus::Syncing => write!(f, "SYNCING"),
+            SubgraphDeploymentStatus::Synced => write!(f, "SYNCED"),
+            SubgraphDeploymentStatus::Failed => write!(f, "FAILED"),
+            SubgraphDeploymentStatus::Paused => write!(f, "PAUSED"),
         }
     }
 }

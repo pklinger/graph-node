@@ -1,14 +1,30 @@
 type Subgraph @entity {
     id: ID!
-    manifest: SubgraphManifest!
-    entityCount: BigInt! # Computed field, not stored.
+    name: String!
+    versions: [SubgraphVersion!]! @derivedFrom(field: 'subgraph')
+    currentVersion: SubgraphVersion
     createdAt: BigInt!
-    status: SubgraphStatus!
-    processedEthereumBlocksCount: BigInt!
-    totalEthereumBlocksCount: BigInt!
 }
 
-enum SubgraphStatus {
+type SubgraphVersion @entity {
+    id: ID!
+    subgraph: Subgraph!
+    deployment: SubgraphDeployment!
+    createdAt: BigInt!
+}
+
+type SubgraphDeployment @entity {
+    id: ID! # Subgraph IPFS hash
+    nodeId: String!
+    manifest: SubgraphManifest!
+    status: SubgraphDeploymentStatus!
+    entityCount: BigInt! # Computed field, not stored.
+    processedEthereumBlocksCount: BigInt!
+    totalEthereumBlocksCount: BigInt!
+    createdAt: BigInt!
+}
+
+enum SubgraphDeploymentStatus {
     SYNCING
     SYNCED
     FAILED

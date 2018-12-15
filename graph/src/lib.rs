@@ -15,6 +15,7 @@ pub extern crate slog;
 pub extern crate failure;
 extern crate ipfs_api;
 extern crate parity_wasm;
+extern crate rand;
 pub extern crate serde_json;
 pub extern crate slog_async;
 extern crate slog_envlogger;
@@ -85,7 +86,7 @@ pub mod prelude {
     };
     pub use data::subgraph::{
         DataSource, Link, MappingABI, MappingEventHandler, SubgraphId, SubgraphManifest,
-        SubgraphManifestResolveError, SubgraphProviderError, SubgraphStatus,
+        SubgraphManifestResolveError, SubgraphProviderError, SubgraphDeploymentStatus,
     };
     pub use data::subscription::{
         QueryResultStream, Subscription, SubscriptionError, SubscriptionResult,

@@ -5,7 +5,7 @@ use std::result;
 use std::sync::Arc;
 
 use graph::components::store::*;
-use graph::data::subgraph::schema::{SUBGRAPHS_ID, SUBGRAPH_ENTITY_TYPENAME};
+use graph::data::subgraph::schema::{SUBGRAPHS_ID, SubgraphDeploymentEntity};
 use graph::prelude::*;
 
 use prelude::*;
@@ -199,7 +199,7 @@ where
         object_type: &s::ObjectType,
     ) -> Result<Entity, QueryExecutionError> {
         if parse_subgraph_id(object_type)? == *SUBGRAPHS_ID
-            && object_type.name == SUBGRAPH_ENTITY_TYPENAME
+            && object_type.name == SubgraphDeploymentEntity::TYPENAME
         {
             let id = match entity["id"].clone() {
                 Value::String(id) => SubgraphId::new(id).expect("invalid subgraph ID in database"),

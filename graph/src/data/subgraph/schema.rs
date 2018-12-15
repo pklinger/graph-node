@@ -1,42 +1,84 @@
 //! See `subgraphs.graphql` in the store for corresponding graphql schema.
 
+use hex;
+use rand::Rng;
+use rand::rngs::OsRng;
+use std::collections::HashMap;
+
 use super::SubgraphId;
 use components::store::{EntityKey, EntityOperation};
-use data::store::{Entity, Value};
-use data::subgraph::SubgraphStatus;
-use std::collections::HashMap;
+use data::store::{Entity, NodeId, Value};
+use data::subgraph::SubgraphDeploymentStatus;
 
 /// ID of the subgraph of subgraphs.
 lazy_static! {
     pub static ref SUBGRAPHS_ID: SubgraphId = SubgraphId::new("subgraphs").unwrap();
 }
 
-/// Type name of the root entity in the subgraph of subgraphs.
-pub const SUBGRAPH_ENTITY_TYPENAME: &str = "Subgraph";
-
-/// Type name of manifests in the subgraph of subgraphs.
-pub const MANIFEST_ENTITY_TYPENAME: &str = "SubgraphManifest";
-
 #[derive(Debug)]
 pub struct SubgraphEntity {
+    name: String,
+    current_version_id: Option<String>,
+    created_at: u64,
+}
+
+impl SubgraphEntity {
+    pub const TYPENAME: &'static str = "Subgraph";
+
+    pub fn write_operations(self, id: &str) -> Vec<EntityOperation> {
+        let mut entity = HashMap::new();
+        entity.insert("id".to_owned(), id.to_owned().into());
+        entity.insert("currentVersion".to_owned(), self.current_version_id.into());
+        entity.insert("createdAt".to_owned(), self.created_at.into());
+        vec![set_entity_operation(Self::TYPENAME, id, entity)]
+    }
+}
+
+#[derive(Debug)]
+pub struct SubgraphVersionEntity {
+    subgraph_id: String,
+    deployment_id: SubgraphId,
+    created_at: u64,
+}
+
+impl SubgraphVersionEntity {
+    pub const TYPENAME: &'static str = "SubgraphVersion";
+
+    pub fn write_operations(self, id: &str) -> Vec<EntityOperation> {
+        let mut entity = HashMap::new();
+        entity.insert("id".to_owned(), id.to_owned().into());
+        entity.insert("subgraph".to_owned(), self.subgraph_id.into());
+        entity.insert("deployment".to_owned(), self.deployment_id.to_string().into());
+        entity.insert("createdAt".to_owned(), self.created_at.into());
+        vec![set_entity_operation(Self::TYPENAME, id, entity)]
+    }
+}
+
+#[derive(Debug)]
+pub struct SubgraphDeploymentEntity {
     id: SubgraphId,
+    node_id: NodeId,
     manifest: SubgraphManifestEntity,
-    status: SubgraphStatus,
+    status: SubgraphDeploymentStatus,
     processed_ethereum_blocks_count: u64,
     total_ethereum_blocks_count: u64,
     created_at: u64,
 }
 
-impl SubgraphEntity {
+impl SubgraphDeploymentEntity {
+    pub const TYPENAME: &'static str = "SubgraphDeployment";
+
     pub fn new(
         source_manifest: &super::SubgraphManifest,
-        status: SubgraphStatus,
+        node_id: NodeId,
+        status: SubgraphDeploymentStatus,
         processed_ethereum_blocks_count: u64,
         total_ethereum_blocks_count: u64,
         created_at: u64,
     ) -> Self {
         Self {
             id: source_manifest.id.clone(),
+            node_id,
             manifest: SubgraphManifestEntity::from(source_manifest),
             status,
             processed_ethereum_blocks_count,
@@ -53,6 +95,7 @@ impl SubgraphEntity {
 
         let mut entity = HashMap::new();
         entity.insert("id".to_owned(), self.id.to_string().into());
+        entity.insert("nodeId".to_owned(), self.node_id.to_string().into());
         entity.insert("manifest".to_owned(), manifest_id.into());
         entity.insert("status".to_owned(), self.status.to_string().into());
         entity.insert(
@@ -64,26 +107,18 @@ impl SubgraphEntity {
             self.total_ethereum_blocks_count.into(),
         );
         entity.insert("createdAt".to_owned(), self.created_at.into());
-        ops.push(set_entity_operation(
-            SUBGRAPH_ENTITY_TYPENAME,
-            self.id.to_string(),
-            entity,
-        ));
+        ops.push(set_entity_operation(Self::TYPENAME, self.id.to_string(), entity));
 
         ops
     }
 
     pub fn write_status_operations(
         id: &SubgraphId,
-        status: SubgraphStatus,
+        status: SubgraphDeploymentStatus,
     ) -> Vec<EntityOperation> {
         let mut entity = HashMap::new();
         entity.insert("status".to_owned(), status.to_string().into());
-        vec![set_entity_operation(
-            SUBGRAPH_ENTITY_TYPENAME,
-            id.to_string(),
-            entity,
-        )]
+        vec![set_entity_operation(Self::TYPENAME, id.to_string(), entity)]
     }
 
     pub fn write_ethereum_block_counts_operations(
@@ -94,11 +129,7 @@ impl SubgraphEntity {
         let mut entity = HashMap::new();
         entity.insert("processedEthereumBlocksCount".to_owned(), processed.into());
         entity.insert("totalEthereumBlocksCount".to_owned(), total.into());
-        vec![set_entity_operation(
-            SUBGRAPH_ENTITY_TYPENAME,
-            id.to_string(),
-            entity,
-        )]
+        vec![set_entity_operation(Self::TYPENAME, id.to_string(), entity)]
     }
 }
 
@@ -112,6 +143,8 @@ pub struct SubgraphManifestEntity {
 }
 
 impl SubgraphManifestEntity {
+    pub const TYPENAME: &'static str = "SubgraphManifest";
+
     pub fn id(subgraph_id: &SubgraphId) -> String {
         format!("{}-manifest", subgraph_id)
     }
@@ -133,7 +166,7 @@ impl SubgraphManifestEntity {
         entity.insert("repository".to_owned(), self.repository.into());
         entity.insert("schema".to_owned(), self.schema.into());
         entity.insert("dataSources".to_owned(), data_source_ids.into());
-        ops.push(set_entity_operation("SubgraphManifest", id, entity));
+        ops.push(set_entity_operation(Self::TYPENAME, id, entity));
 
         ops
     }
@@ -161,6 +194,8 @@ struct EthereumContractDataSourceEntity {
 }
 
 impl EthereumContractDataSourceEntity {
+    pub const TYPENAME: &'static str = "EthereumContractDataSource";
+
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
         let mut ops = vec![];
 
@@ -178,7 +213,7 @@ impl EthereumContractDataSourceEntity {
         entity.insert("source".to_owned(), source_id.into());
         entity.insert("mapping".to_owned(), mapping_id.into());
         ops.push(set_entity_operation(
-            "EthereumContractDataSource",
+            Self::TYPENAME,
             id,
             entity,
         ));
@@ -206,12 +241,14 @@ struct EthereumContractSourceEntity {
 }
 
 impl EthereumContractSourceEntity {
+    pub const TYPENAME: &'static str = "EthereumContractSource";
+
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
         let mut entity = HashMap::new();
         entity.insert("id".to_owned(), id.clone().into());
         entity.insert("address".to_owned(), self.address.into());
         entity.insert("abi".to_owned(), self.abi.into());
-        vec![set_entity_operation("EthereumContractSource", id, entity)]
+        vec![set_entity_operation(Self::TYPENAME, id, entity)]
     }
 }
 
@@ -236,6 +273,8 @@ struct EthereumContractMappingEntity {
 }
 
 impl EthereumContractMappingEntity {
+    pub const TYPENAME: &'static str = "EthereumContractMapping";
+
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
         let mut ops = vec![];
 
@@ -269,7 +308,7 @@ impl EthereumContractMappingEntity {
                 .into(),
         );
         entity.insert("eventHandlers".to_owned(), event_handler_ids.into());
-        ops.push(set_entity_operation("EthereumContractMapping", id, entity));
+        ops.push(set_entity_operation(Self::TYPENAME, id, entity));
 
         ops
     }
@@ -301,12 +340,14 @@ struct EthereumContractAbiEntity {
 }
 
 impl EthereumContractAbiEntity {
+    pub const TYPENAME: &'static str = "EthereumContractAbi";
+
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
         let mut entity = HashMap::new();
         entity.insert("id".to_owned(), id.clone().into());
         entity.insert("name".to_owned(), self.name.into());
         entity.insert("file".to_owned(), self.file.into());
-        vec![set_entity_operation("EthereumContractAbi", id, entity)]
+        vec![set_entity_operation(Self::TYPENAME, id, entity)]
     }
 }
 
@@ -326,13 +367,15 @@ struct EthereumContractEventHandlerEntity {
 }
 
 impl EthereumContractEventHandlerEntity {
+    pub const TYPENAME: &'static str = "EthereumContractEventHandler";
+
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
         let mut entity = HashMap::new();
         entity.insert("id".to_owned(), id.clone().into());
         entity.insert("event".to_owned(), self.event.into());
         entity.insert("handler".to_owned(), self.handler.into());
         vec![set_entity_operation(
-            "EthereumContractEventHandler",
+            Self::TYPENAME,
             id,
             entity,
         )]
@@ -361,4 +404,17 @@ fn set_entity_operation(
         },
         data: data.into(),
     }
+}
+
+pub fn generate_entity_id() -> String {
+    // Fast crypto RNG from operating system
+    let mut rng = OsRng::new().unwrap();
+
+    // 128 random bits
+    let id_bytes: [u8; 16] = rng.gen();
+
+    // 32 hex chars
+    // Comparable to uuidv4, but without the hyphens,
+    // and without spending bits on a version identifier.
+    hex::encode(id_bytes)
 }

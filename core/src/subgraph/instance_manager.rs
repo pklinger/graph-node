@@ -1,6 +1,6 @@
 use futures::sync::mpsc::{channel, Receiver, Sender};
 use graph::components::subgraph::SubgraphProviderEvent;
-use graph::data::subgraph::schema::SubgraphEntity;
+use graph::data::subgraph::schema::SubgraphDeploymentEntity;
 use graph::prelude::{SubgraphInstance as SubgraphInstanceTrait, *};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -267,9 +267,9 @@ impl SubgraphInstanceManager {
                         );
 
                         // Set subgraph status to Failed
-                        let status_ops = SubgraphEntity::write_status_operations(
+                        let status_ops = SubgraphDeploymentEntity::write_status_operations(
                             &id_for_err,
-                            SubgraphStatus::Failed,
+                            SubgraphDeploymentStatus::Failed,
                         );
                         if let Err(e) =
                             store_for_errors.apply_entity_operations(status_ops, EventSource::None)

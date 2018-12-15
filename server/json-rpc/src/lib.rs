@@ -12,11 +12,16 @@ use jsonrpc_http_server::{
 use std::collections::BTreeMap;
 use std::iter::FromIterator;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::{fmt, io};
+use std::io;
 
 const JSON_RPC_DEPLOY_ERROR: i64 = 0;
 const JSON_RPC_REMOVE_ERROR: i64 = 1;
 const JSON_RPC_INTERNAL_ERROR: i64 = 3;
+
+#[derive(Debug, Deserialize)]
+struct SubgraphCreateParams {
+    name: SubgraphDeploymentName,
+}
 
 #[derive(Debug, Deserialize)]
 struct SubgraphDeployParams {
@@ -25,46 +30,58 @@ struct SubgraphDeployParams {
     node_id: Option<NodeId>,
 }
 
-impl fmt::Display for SubgraphDeployParams {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "{:?}", self)
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct SubgraphRemoveParams {
     name: SubgraphDeploymentName,
 }
 
-impl fmt::Display for SubgraphRemoveParams {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "{:?}", self)
-    }
-}
-
 pub struct JsonRpcServer<P> {
     provider: Arc<P>,
-    logger: Logger,
+    http_port: u16,
+    ws_port: u16,
     node_id: NodeId,
+    logger: Logger,
 }
 
 impl<P> JsonRpcServer<P>
 where
     P: SubgraphProviderWithNames,
 {
+    /// Handler for the `subgraph_create` endpoint.
+    fn create_handler(
+        &self,
+        params: SubgraphCreateParams,
+    ) -> Box<Future<Item = Value, Error = jsonrpc_core::Error> + Send> {
+        let logger = self.logger.clone();
+
+        info!(logger, "Received subgraph_create request"; "params" => format!("{:?}", params));
+
+        Box::new(
+            self.provider
+                .deploy(params.name, params.ipfs_hash, node_id)
+                .map_err(move |e| {
+                    if let SubgraphProviderError::Unknown(e) = e {
+                        error!(logger, "subgraph_deploy failed: {}", e);
+                        json_rpc_error(JSON_RPC_DEPLOY_ERROR, "internal error".to_owned())
+                    } else {
+                        json_rpc_error(JSON_RPC_DEPLOY_ERROR, e.to_string())
+                    }
+                })
+                .map(move |_| routes),
+        )
+    }
+
     /// Handler for the `subgraph_deploy` endpoint.
     fn deploy_handler(
         &self,
-        http_port: u16,
-        ws_port: u16,
         params: SubgraphDeployParams,
     ) -> Box<Future<Item = Value, Error = jsonrpc_core::Error> + Send> {
         let logger = self.logger.clone();
 
-        info!(logger, "Received subgraph_deploy request"; "params" => params.to_string());
+        info!(logger, "Received subgraph_deploy request"; "params" => format!("{:?}", params));
 
         let node_id = params.node_id.clone().unwrap_or(self.node_id.clone());
-        let routes = subgraph_routes(&params.name, http_port, ws_port);
+        let routes = subgraph_routes(&params.name, self.http_port, self.ws_port);
 
         Box::new(
             self.provider
@@ -88,7 +105,7 @@ where
     ) -> Box<Future<Item = Value, Error = jsonrpc_core::Error> + Send> {
         let logger = self.logger.clone();
 
-        info!(logger, "Received subgraph_remove request"; "params" => params.to_string());
+        info!(logger, "Received subgraph_remove request"; "params" => format!("{:?}", params));
 
         Box::new(
             self.provider
@@ -155,20 +172,30 @@ where
 
         let arc_self = Arc::new(JsonRpcServer {
             provider,
+            http_port,
+            ws_port,
             node_id,
             logger,
         });
-        // `subgraph_deploy` handler.
+
+        let me = arc_self.clone();
+        handler.add_method("subgraph_create", move |params: Params| {
+            let me = me.clone();
+            params
+                .parse()
+                .into_future()
+                .and_then(move |params| me.create_handler(params))
+        });
+
         let me = arc_self.clone();
         handler.add_method("subgraph_deploy", move |params: Params| {
             let me = me.clone();
             params
                 .parse()
                 .into_future()
-                .and_then(move |params| me.deploy_handler(http_port, ws_port, params))
+                .and_then(move |params| me.deploy_handler(params))
         });
 
-        // `subgraph_remove` handler.
         let me = arc_self.clone();
         handler.add_method("subgraph_remove", move |params: Params| {
             let me = me.clone();
@@ -178,7 +205,6 @@ where
                 .and_then(move |params| me.remove_handler(params))
         });
 
-        // `subgraph_list` handler.
         let me = arc_self.clone();
         handler.add_method("subgraph_list", move |_| me.list_handler());
 
