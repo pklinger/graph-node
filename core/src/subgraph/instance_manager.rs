@@ -1,5 +1,5 @@
 use futures::sync::mpsc::{channel, Receiver, Sender};
-use graph::components::subgraph::SubgraphProviderEvent;
+use graph::components::subgraph::SubgraphDeploymentProviderEvent;
 use graph::data::subgraph::schema::SubgraphDeploymentEntity;
 use graph::prelude::{SubgraphInstance as SubgraphInstanceTrait, *};
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ type InstanceShutdownMap = Arc<RwLock<HashMap<SubgraphId, CancelGuard>>>;
 
 pub struct SubgraphInstanceManager {
     logger: Logger,
-    input: Sender<SubgraphProviderEvent>,
+    input: Sender<SubgraphDeploymentProviderEvent>,
 }
 
 impl SubgraphInstanceManager {
@@ -57,7 +57,7 @@ impl SubgraphInstanceManager {
     /// Handle incoming events from subgraph providers.
     fn handle_subgraph_events<B, S, T>(
         logger: Logger,
-        receiver: Receiver<SubgraphProviderEvent>,
+        receiver: Receiver<SubgraphDeploymentProviderEvent>,
         store: Arc<S>,
         host_builder: T,
         block_stream_builder: B,
@@ -71,7 +71,7 @@ impl SubgraphInstanceManager {
         let instances: InstanceShutdownMap = Default::default();
 
         tokio::spawn(receiver.for_each(move |event| {
-            use self::SubgraphProviderEvent::*;
+            use self::SubgraphDeploymentProviderEvent::*;
 
             match event {
                 SubgraphStart(manifest) => {
@@ -296,9 +296,9 @@ impl SubgraphInstanceManager {
     }
 }
 
-impl EventConsumer<SubgraphProviderEvent> for SubgraphInstanceManager {
+impl EventConsumer<SubgraphDeploymentProviderEvent> for SubgraphInstanceManager {
     /// Get the wrapped event sink.
-    fn event_sink(&self) -> Box<Sink<SinkItem = SubgraphProviderEvent, SinkError = ()> + Send> {
+    fn event_sink(&self) -> Box<Sink<SinkItem = SubgraphDeploymentProviderEvent, SinkError = ()> + Send> {
         let logger = self.logger.clone();
         Box::new(self.input.clone().sink_map_err(move |e| {
             error!(logger, "Component was dropped: {}", e);

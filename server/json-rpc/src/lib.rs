@@ -60,7 +60,7 @@ where
             self.provider
                 .deploy(params.name, params.ipfs_hash, node_id)
                 .map_err(move |e| {
-                    if let SubgraphProviderError::Unknown(e) = e {
+                    if let SubgraphDeploymentProviderError::Unknown(e) = e {
                         error!(logger, "subgraph_deploy failed: {}", e);
                         json_rpc_error(JSON_RPC_DEPLOY_ERROR, "internal error".to_owned())
                     } else {
@@ -87,7 +87,7 @@ where
             self.provider
                 .deploy(params.name, params.ipfs_hash, node_id)
                 .map_err(move |e| {
-                    if let SubgraphProviderError::Unknown(e) = e {
+                    if let SubgraphDeploymentProviderError::Unknown(e) = e {
                         error!(logger, "subgraph_deploy failed: {}", e);
                         json_rpc_error(JSON_RPC_DEPLOY_ERROR, "internal error".to_owned())
                     } else {
@@ -111,7 +111,7 @@ where
             self.provider
                 .remove(params.name)
                 .map_err(move |e| {
-                    if let SubgraphProviderError::Unknown(e) = e {
+                    if let SubgraphDeploymentProviderError::Unknown(e) = e {
                         error!(logger, "subgraph_remove failed: {}", e);
                         json_rpc_error(JSON_RPC_REMOVE_ERROR, "internal error".to_owned())
                     } else {

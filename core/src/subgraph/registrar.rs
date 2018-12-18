@@ -68,7 +68,7 @@ where
             // Spawn a task to handle deployment events
             tokio::spawn(future::lazy(move || {
                 deployment_event_stream
-                    .map_err(SubgraphProviderError::Unknown)
+                    .map_err(SubgraphDeploymentProviderError::Unknown)
                     .map_err(CancelableError::Error)
                     .cancelable(&deployment_event_stream_cancel_handle, || {
                         CancelableError::Cancel
@@ -118,7 +118,7 @@ where
         name: SubgraphDeploymentName,
         id: SubgraphId,
         node_id: NodeId,
-    ) -> Box<Future<Item = (), Error = SubgraphProviderError> + Send + 'static> {
+    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static> {
         debug!(
             self.logger,
             "Writing deployment entry to store: name = {:?}, subgraph ID = {:?}",
@@ -132,7 +132,7 @@ where
     fn remove(
         &self,
         name: SubgraphDeploymentName,
-    ) -> Box<Future<Item = (), Error = SubgraphProviderError> + Send + 'static> {
+    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static> {
         debug!(
             self.logger,
             "Removing deployment entry from store: {:?}",
@@ -146,7 +146,7 @@ where
                     if did_remove {
                         Ok(())
                     } else {
-                        Err(SubgraphProviderError::NameNotFound(name.to_string()))
+                        Err(SubgraphDeploymentProviderError::NameNotFound(name.to_string()))
                     }
                 }),
         )
@@ -161,7 +161,7 @@ fn handle_deployment_event<P>(
     event: DeploymentEvent,
     provider: Arc<P>,
     logger: &Logger,
-) -> Box<Future<Item = (), Error = CancelableError<SubgraphProviderError>> + Send>
+) -> Box<Future<Item = (), Error = CancelableError<SubgraphDeploymentProviderError>> + Send>
 where
     P: SubgraphDeploymentProviderTrait,
 {
@@ -181,7 +181,7 @@ where
                     .then(move |result| -> Result<(), _> {
                         match result {
                             Ok(()) => Ok(()),
-                            Err(SubgraphProviderError::AlreadyRunning(_)) => Ok(()),
+                            Err(SubgraphDeploymentProviderError::AlreadyRunning(_)) => Ok(()),
                             Err(e) => {
                                 // Errors here are likely an issue with the subgraph.
                                 // These will be recorded eventually so that they can be displayed
@@ -206,7 +206,7 @@ where
                 .stop(subgraph_id)
                 .then(|result| match result {
                     Ok(()) => Ok(()),
-                    Err(SubgraphProviderError::NotRunning(_)) => Ok(()),
+                    Err(SubgraphDeploymentProviderError::NotRunning(_)) => Ok(()),
                     Err(e) => Err(e),
                 })
                 .map_err(CancelableError::Error),

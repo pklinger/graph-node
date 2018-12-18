@@ -154,7 +154,7 @@ fn multiple_data_sources_per_subgraph() {
                 // Send the new subgraph to the manager.
                 manager
                     .event_sink()
-                    .send(SubgraphProviderEvent::SubgraphStart(subgraph))
+                    .send(SubgraphDeploymentProviderEvent::SubgraphStart(subgraph))
             })
             .and_then(move |_| {
                 // If we created a RuntimeHost for each data source,
@@ -189,9 +189,9 @@ fn multiple_data_sources_per_subgraph() {
         .unwrap();
 }
 
-fn added_subgraph_id_eq(event: &SubgraphProviderEvent, id: &SubgraphId) -> bool {
+fn added_subgraph_id_eq(event: &SubgraphDeploymentProviderEvent, id: &SubgraphId) -> bool {
     match event {
-        SubgraphProviderEvent::SubgraphStart(manifest) => &manifest.id == id,
+        SubgraphDeploymentProviderEvent::SubgraphStart(manifest) => &manifest.id == id,
         _ => false,
     }
 }
@@ -205,7 +205,7 @@ fn subgraph_provider_events() {
             let resolver = Arc::new(IpfsClient::default());
             let store = Arc::new(MockStore::new(vec![]));
             let mut provider =
-                graph_core::SubgraphProvider::new(logger.clone(), resolver.clone(), store.clone());
+                graph_core::SubgraphDeploymentProvider::new(logger.clone(), resolver.clone(), store.clone());
             let provider_events = provider.take_event_stream().unwrap();
             let node_id = NodeId::new("test").unwrap();
 
@@ -299,9 +299,9 @@ fn subgraph_provider_events() {
                                 .iter()
                                 .any(|event| added_subgraph_id_eq(event, &subgraph2_id_clone2)));
                             assert!(provider_events.iter().any(|event| event
-                                == &SubgraphProviderEvent::SubgraphStop(subgraph1_id.clone())));
+                                == &SubgraphDeploymentProviderEvent::SubgraphStop(subgraph1_id.clone())));
                             assert!(provider_events.iter().any(|event| event
-                                == &SubgraphProviderEvent::SubgraphStop(
+                                == &SubgraphDeploymentProviderEvent::SubgraphStop(
                                     subgraph2_id_clone2.clone()
                                 )));
                             Ok(())
@@ -321,7 +321,7 @@ fn subgraph_list() {
             let store = Arc::new(MockStore::new(vec![]));
             let resolver = Arc::new(IpfsClient::default());
             let provider =
-                graph_core::SubgraphProvider::new(logger.clone(), resolver, store.clone());
+                graph_core::SubgraphDeploymentProvider::new(logger.clone(), resolver, store.clone());
             let node_id = NodeId::new("testnode").unwrap();
 
             let named_provider = graph_core::SubgraphRegistrar::new(

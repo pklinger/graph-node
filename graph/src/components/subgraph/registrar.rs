@@ -5,19 +5,19 @@ pub trait SubgraphRegistrar: Send + Sync + 'static {
     fn create_subgraph(
         &self,
         name: SubgraphDeploymentName,
-    ) -> Box<Future<Item = (), Error = SubgraphProviderError> + Send + 'static>;
+    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static>;
 
     fn create_subgraph_version(
         &self,
         name: SubgraphDeploymentName,
         id: SubgraphId,
         deployment_node_id: NodeId,
-    ) -> Box<Future<Item = (), Error = SubgraphProviderError> + Send + 'static>;
+    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static>;
 
     fn remove_subgraph(
         &self,
         name: SubgraphDeploymentName,
-    ) -> Box<Future<Item = (), Error = SubgraphProviderError> + Send + 'static>;
+    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static>;
 
     fn list(&self) -> Result<Vec<(SubgraphDeploymentName, SubgraphId)>, Error>;
 }

@@ -4,18 +4,18 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use graph::data::subgraph::schema::SubgraphDeploymentEntity;
-use graph::prelude::{SubgraphProvider as SubgraphProviderTrait, *};
+use graph::prelude::{SubgraphDeploymentProvider as SubgraphDeploymentProviderTrait, *};
 
-pub struct SubgraphProvider<L, S> {
+pub struct SubgraphDeploymentProvider<L, S> {
     logger: Logger,
-    event_stream: Option<Receiver<SubgraphProviderEvent>>,
-    event_sink: Sender<SubgraphProviderEvent>,
+    event_stream: Option<Receiver<SubgraphDeploymentProviderEvent>>,
+    event_sink: Sender<SubgraphDeploymentProviderEvent>,
     resolver: Arc<L>,
     subgraphs_running: Arc<Mutex<HashSet<SubgraphId>>>,
     store: Arc<S>,
 }
 
-impl<L, S> SubgraphProvider<L, S>
+impl<L, S> SubgraphDeploymentProvider<L, S>
 where
     L: LinkResolver,
     S: Store,
@@ -24,8 +24,8 @@ where
         let (event_sink, event_stream) = channel(100);
 
         // Create the subgraph provider
-        SubgraphProvider {
-            logger: logger.new(o!("component" => "SubgraphProvider")),
+        SubgraphDeploymentProvider {
+            logger: logger.new(o!("component" => "SubgraphDeploymentProvider")),
             event_stream: Some(event_stream),
             event_sink,
             resolver,
@@ -36,7 +36,7 @@ where
 
     /// Clones but forcing receivers to `None`.
     fn clone(&self) -> Self {
-        SubgraphProvider {
+        SubgraphDeploymentProvider {
             logger: self.logger.clone(),
             event_stream: None,
             event_sink: self.event_sink.clone(),
@@ -47,7 +47,7 @@ where
     }
 }
 
-impl<L, S> SubgraphProviderTrait for SubgraphProvider<L, S>
+impl<L, S> SubgraphDeploymentProviderTrait for SubgraphDeploymentProvider<L, S>
 where
     L: LinkResolver,
     S: Store,
@@ -55,14 +55,14 @@ where
     fn start(
         &self,
         id: SubgraphId,
-    ) -> Box<Future<Item = (), Error = SubgraphProviderError> + Send + 'static> {
+    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static> {
         let self_clone = self.clone();
 
         let link = format!("/ipfs/{}", id);
 
         Box::new(
             SubgraphManifest::resolve(Link { link }, self.resolver.clone())
-                .map_err(SubgraphProviderError::ResolveError)
+                .map_err(SubgraphDeploymentProviderError::ResolveError)
                 .and_then(move |subgraph| -> Box<Future<Item = _, Error = _> + Send> {
                     // If subgraph ID already in set
                     if !self_clone
@@ -71,7 +71,7 @@ where
                         .unwrap()
                         .insert(subgraph.id.clone())
                     {
-                        return Box::new(future::err(SubgraphProviderError::AlreadyRunning(
+                        return Box::new(future::err(SubgraphDeploymentProviderError::AlreadyRunning(
                             subgraph.id,
                         )));
                     }
@@ -106,7 +106,7 @@ where
                         self_clone
                             .event_sink
                             .clone()
-                            .send(SubgraphProviderEvent::SubgraphStart(subgraph))
+                            .send(SubgraphDeploymentProviderEvent::SubgraphStart(subgraph))
                             .map_err(|e| panic!("failed to forward subgraph: {}", e))
                             .map(|_| ()),
                     )
@@ -117,29 +117,29 @@ where
     fn stop(
         &self,
         id: SubgraphId,
-    ) -> Box<Future<Item = (), Error = SubgraphProviderError> + Send + 'static> {
+    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static> {
         // If subgraph ID was in set
         if self.subgraphs_running.lock().unwrap().remove(&id) {
             // Shut down subgraph processing
             Box::new(
                 self.event_sink
                     .clone()
-                    .send(SubgraphProviderEvent::SubgraphStop(id))
+                    .send(SubgraphDeploymentProviderEvent::SubgraphStop(id))
                     .map_err(|e| panic!("failed to forward subgraph shut down event: {}", e))
                     .map(|_| ()),
             )
         } else {
-            Box::new(future::err(SubgraphProviderError::NotRunning(id)))
+            Box::new(future::err(SubgraphDeploymentProviderError::NotRunning(id)))
         }
     }
 }
 
-impl<L, S> EventProducer<SubgraphProviderEvent> for SubgraphProvider<L, S> {
+impl<L, S> EventProducer<SubgraphDeploymentProviderEvent> for SubgraphDeploymentProvider<L, S> {
     fn take_event_stream(
         &mut self,
-    ) -> Option<Box<Stream<Item = SubgraphProviderEvent, Error = ()> + Send>> {
+    ) -> Option<Box<Stream<Item = SubgraphDeploymentProviderEvent, Error = ()> + Send>> {
         self.event_stream
             .take()
-            .map(|s| Box::new(s) as Box<Stream<Item = SubgraphProviderEvent, Error = ()> + Send>)
+            .map(|s| Box::new(s) as Box<Stream<Item = SubgraphDeploymentProviderEvent, Error = ()> + Send>)
     }
 }
