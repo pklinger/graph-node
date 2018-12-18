@@ -1,6 +1,6 @@
 use components::EventConsumer;
 
-use super::SubgraphProviderEvent;
+use crate::data::subgraph::SubgraphProviderEvent;
 
 /// A `SubgraphInstanceManager` loads and manages subgraph instances.
 ///

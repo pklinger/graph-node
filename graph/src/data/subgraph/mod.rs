@@ -115,12 +115,24 @@ impl fmt::Display for SubgraphDeploymentStatus {
 }
 
 #[derive(Fail, Debug)]
+pub enum SubgraphRegistrarError {
+    #[fail(display = "subgraph name not found: {}", _0)]
+    NameNotFound(String),
+    #[fail(display = "subgraph provider error: {}", _0)]
+    Unknown(failure::Error),
+}
+
+impl From<Error> for SubgraphRegistrarError {
+    fn from(e: Error) -> Self {
+        SubgraphRegistrarError::Unknown(e)
+    }
+}
+
+#[derive(Fail, Debug)]
 pub enum SubgraphProviderError {
     #[fail(display = "subgraph resolve error: {}", _0)]
     ResolveError(SubgraphManifestResolveError),
     /// Occurs when attempting to remove a subgraph that's not hosted.
-    #[fail(display = "subgraph name not found: {}", _0)]
-    NameNotFound(String),
     #[fail(display = "subgraph with ID {} already running", _0)]
     AlreadyRunning(SubgraphId),
     #[fail(display = "subgraph with ID {} is not running", _0)]
@@ -136,6 +148,15 @@ impl From<Error> for SubgraphProviderError {
     fn from(e: Error) -> Self {
         SubgraphProviderError::Unknown(e)
     }
+}
+
+/// Events emitted by [SubgraphProvider](trait.SubgraphProvider.html) implementations.
+#[derive(Debug, PartialEq)]
+pub enum SubgraphProviderEvent {
+    /// A subgraph with the given manifest should start processing.
+    SubgraphStart(SubgraphManifest),
+    /// The subgraph with the given ID should stop processing.
+    SubgraphStop(SubgraphId),
 }
 
 #[derive(Fail, Debug)]

@@ -45,7 +45,7 @@ pub struct JsonRpcServer<P> {
 
 impl<P> JsonRpcServer<P>
 where
-    P: SubgraphProviderWithNames,
+    P: SubgraphRegistrar,
 {
     /// Handler for the `subgraph_create` endpoint.
     fn create_handler(
@@ -147,7 +147,7 @@ where
 
 impl<P> JsonRpcServerTrait<P> for JsonRpcServer<P>
 where
-    P: SubgraphProviderWithNames,
+    P: SubgraphRegistrar,
 {
     type Server = Server;
 

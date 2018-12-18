@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
 use graph::prelude::{
-    SubgraphProvider as SubgraphProviderTrait,
-    SubgraphProviderWithNames as SubgraphProviderWithNamesTrait, *,
+    SubgraphDeploymentProvider as SubgraphDeploymentProviderTrait,
+    SubgraphRegistrar as SubgraphRegistrarTrait, *,
 };
 
-pub struct SubgraphProviderWithNames<P, S> {
+pub struct SubgraphRegistrar<P, S> {
     logger: Logger,
     provider: Arc<P>,
     store: Arc<S>,
@@ -13,15 +13,15 @@ pub struct SubgraphProviderWithNames<P, S> {
     deployment_event_stream_cancel_guard: CancelGuard, // cancels on drop
 }
 
-impl<P, S> SubgraphProviderWithNames<P, S>
+impl<P, S> SubgraphRegistrar<P, S>
 where
-    P: SubgraphProviderTrait,
+    P: SubgraphDeploymentProviderTrait,
     S: SubgraphDeploymentStore,
 {
     pub fn new(logger: Logger, provider: Arc<P>, store: Arc<S>, node_id: NodeId) -> Self {
-        let logger = logger.new(o!("component" => "SubgraphProviderWithNames"));
+        let logger = logger.new(o!("component" => "SubgraphRegistrar"));
 
-        SubgraphProviderWithNames {
+        SubgraphRegistrar {
             logger,
             provider,
             store,
@@ -108,9 +108,9 @@ where
     }
 }
 
-impl<P, S> SubgraphProviderWithNamesTrait for SubgraphProviderWithNames<P, S>
+impl<P, S> SubgraphRegistrarTrait for SubgraphRegistrar<P, S>
 where
-    P: SubgraphProviderTrait,
+    P: SubgraphDeploymentProviderTrait,
     S: SubgraphDeploymentStore,
 {
     fn deploy(
@@ -163,7 +163,7 @@ fn handle_deployment_event<P>(
     logger: &Logger,
 ) -> Box<Future<Item = (), Error = CancelableError<SubgraphProviderError>> + Send>
 where
-    P: SubgraphProviderTrait,
+    P: SubgraphDeploymentProviderTrait,
 {
     let logger = logger.to_owned();
 

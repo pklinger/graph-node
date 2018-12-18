@@ -209,7 +209,7 @@ fn subgraph_provider_events() {
             let provider_events = provider.take_event_stream().unwrap();
             let node_id = NodeId::new("test").unwrap();
 
-            let named_provider = graph_core::SubgraphProviderWithNames::new(
+            let named_provider = graph_core::SubgraphRegistrar::new(
                 logger.clone(),
                 Arc::new(provider),
                 store,
@@ -324,7 +324,7 @@ fn subgraph_list() {
                 graph_core::SubgraphProvider::new(logger.clone(), resolver, store.clone());
             let node_id = NodeId::new("testnode").unwrap();
 
-            let named_provider = graph_core::SubgraphProviderWithNames::new(
+            let named_provider = graph_core::SubgraphRegistrar::new(
                 logger.clone(),
                 Arc::new(provider),
                 store,
