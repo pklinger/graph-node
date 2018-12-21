@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use graph::data::subgraph::schema::SubgraphEntity;
 use graph::prelude::{SubgraphProvider as SubgraphProviderTrait, *};
-use graph_graphql::prelude::schema;
+use graph_graphql::prelude::parser_schema::{Definition, Document, TypeDefinition};
 use graph_graphql::schema::ast as sast;
 
 pub struct SubgraphProvider<L, S> {
@@ -98,73 +98,25 @@ where
                         })
                         .ok();
 
-                    // Build indexes for each entity attribute pair in the Subgraph
-                    let mut indexing_ops = vec![];
-                    for (entity_number, schema_type) in subgraph
-                        .schema
-                        .document
-                        .definitions
-                        .clone()
-                        .into_iter()
-                        .enumerate()
-                    {
-                        match schema_type {
-                            schema::Definition::TypeDefinition(definition) => match definition {
-                                schema::TypeDefinition::Object(schema_object) => {
-                                    for (attribute_number, entity_field) in
-                                        schema_object.fields.into_iter().enumerate()
-                                    {
-                                        let subgraph_id = subgraph.id.clone();
-                                        let index_name: String = format!(
-                                            "{}_{}_{}_idx",
-                                            subgraph_id, entity_number, attribute_number,
-                                        );
-                                        let field_value_type = match sast::get_valid_value_type(
-                                            &entity_field.field_type,
-                                        ) {
-                                            Ok(value_type) => value_type,
-                                            Err(_) => continue,
-                                        };
-
-                                        let (index_type, index_operator) = match field_value_type {
-                                            ValueType::Boolean
-                                            | ValueType::BigInt
-                                            | ValueType::Bytes
-                                            | ValueType::Float
-                                            | ValueType::ID
-                                            | ValueType::Int => {
-                                                (String::from("btree"), String::from(""))
-                                            }
-                                            ValueType::String => {
-                                                (String::from("gin"), String::from("gin_trgm_ops"))
-                                            }
-                                        };
-                                        let attribute_name = entity_field.name;
-                                        let entity_name = schema_object.name.clone();
-
-                                        indexing_ops.push(AttributeIndexOperation {
-                                            subgraph_id,
-                                            index_name,
-                                            index_type,
-                                            index_operator,
-                                            attribute_name,
-                                            entity_name,
-                                        });
-                                    }
-                                }
-                                _ => (),
-                            },
-                            _ => (),
-                        }
-                    }
+                    // Build indexes for each entity attribute in the Subgraph
+                    let indexing_ops = attribute_indexing_operations(
+                        subgraph.id.clone(),
+                        subgraph.schema.document.clone(),
+                    );
                     self_clone
                         .store
                         .clone()
                         .build_entity_attribute_indexes(indexing_ops)
                         .map_err(|err| {
-                            error!(
+                            debug!(
                                 self_clone.logger,
-                                "Failed to create indexes on subgraph entities: {}", err
+                                "No subgraph entity indexes created: {}", err
+                            )
+                        })
+                        .map(|_| {
+                            info!(
+                                self_clone.logger,
+                                "Successfully created indexes for all attributes"
                             )
                         })
                         .ok();
@@ -210,4 +162,49 @@ impl<L, S> EventProducer<SubgraphProviderEvent> for SubgraphProvider<L, S> {
             .take()
             .map(|s| Box::new(s) as Box<Stream<Item = SubgraphProviderEvent, Error = ()> + Send>)
     }
+}
+
+fn attribute_indexing_operations(
+    subgraph_id: SubgraphId,
+    document: Document,
+) -> Vec<AttributeIndexOperation> {
+    let mut indexing_ops = vec![];
+    for (entity_number, schema_type) in document.definitions.clone().into_iter().enumerate() {
+        if let Definition::TypeDefinition(definition) = schema_type {
+            if let TypeDefinition::Object(schema_object) = definition {
+                for (attribute_number, entity_field) in schema_object.fields.into_iter().enumerate()
+                {
+                    let field_value_type =
+                        match sast::get_valid_value_type(&entity_field.field_type) {
+                            Ok(value_type) => value_type,
+                            Err(_) => continue,
+                        };
+                    let (index_type, index_operator) = match field_value_type {
+                        ValueType::Boolean
+                        | ValueType::BigInt
+                        | ValueType::Bytes
+                        | ValueType::Float
+                        | ValueType::ID
+                        | ValueType::Int => (String::from("btree"), String::from("")),
+                        ValueType::String => (String::from("gin"), String::from("gin_trgm_ops")),
+                    };
+
+                    indexing_ops.push(AttributeIndexOperation {
+                        subgraph_id: subgraph_id.clone(),
+                        index_name: format!(
+                            "{}_{}_{}_idx",
+                            subgraph_id.clone(),
+                            entity_number,
+                            attribute_number,
+                        ),
+                        index_type,
+                        index_operator,
+                        attribute_name: entity_field.name,
+                        entity_name: schema_object.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    indexing_ops
 }
