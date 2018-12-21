@@ -157,6 +157,13 @@ impl Store for TestStore {
         unimplemented!()
     }
 
+    fn build_entity_attribute_indexes(
+        &self,
+        operations: Vec<AttributeIndexOperation>,
+    ) -> Result<(), Error> {
+        unimplemented!()
+    }
+
     fn transact_block_operations(
         &self,
         _: SubgraphId,

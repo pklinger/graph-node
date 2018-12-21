@@ -248,6 +248,16 @@ impl fmt::Display for EventSource {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttributeIndexOperation {
+    pub subgraph_id: SubgraphId,
+    pub index_name: String,
+    pub index_type: String,
+    pub index_operator: String,
+    pub attribute_name: String,
+    pub entity_name: String,
+}
+
 /// Common trait for store implementations.
 pub trait Store: Send + Sync + 'static {
     /// Register a new subgraph ID in the store, and initialize the subgraph's block pointer to the
@@ -297,6 +307,12 @@ pub trait Store: Send + Sync + 'static {
         &self,
         operations: Vec<EntityOperation>,
         event_source: EventSource,
+    ) -> Result<(), Error>;
+
+    /// Build indexes for a set of subgraph entity attributes
+    fn build_entity_attribute_indexes(
+        &self,
+        operations: Vec<AttributeIndexOperation>,
     ) -> Result<(), Error>;
 
     /// Revert the entity changes from a single block atomically in the store, and update the
