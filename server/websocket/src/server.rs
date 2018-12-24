@@ -1,5 +1,5 @@
 use futures::prelude::*;
-use graph::data::subgraph::schema::SUBGRAPHS_ID;
+use graph::data::subgraph::schema::{SubgraphEntity, SubgraphVersionEntity, SUBGRAPHS_ID};
 use graph::prelude::{SubscriptionServer as SubscriptionServerTrait, *};
 use graph::tokio::net::TcpListener;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -20,7 +20,7 @@ pub struct SubscriptionServer<Q, S> {
 impl<Q, S> SubscriptionServer<Q, S>
 where
     Q: GraphQlRunner,
-    S: SubgraphDeploymentStore,
+    S: SubgraphDeploymentStore + Store,
 {
     pub fn new(logger: &Logger, graphql_runner: Arc<Q>, store: Arc<S>) -> Self {
         SubscriptionServer {
@@ -43,23 +43,67 @@ where
         match path_segments.as_slice() {
             &["subgraphs"] => Ok(SUBGRAPHS_ID.clone()),
             &["subgraphs", "id", subgraph_id] => SubgraphId::new(subgraph_id),
-            &["subgraphs", "name", subgraph_name] => SubgraphDeploymentName::new(subgraph_name)
+            &["subgraphs", "name", subgraph_name] => SubgraphName::new(subgraph_name)
                 .map(|subgraph_name| {
-                    store
-                        .read(subgraph_name)
-                        .expect("error reading subgraph name from store")
+                    Self::resolve_subgraph_name_to_id(store.clone(), subgraph_name)
+                        .expect("failed to resolve subgraph name to ID")
                 })
-                .and_then(|deployment_opt| deployment_opt.ok_or(()))
-                .map(|(subgraph_id, _node_id)| subgraph_id),
+                .and_then(|deployment_opt| deployment_opt.ok_or(())),
             _ => return Err(()),
         }
+    }
+
+    // TODO DRY this up (dupe from server/http/src/service.rs)
+    fn resolve_subgraph_name_to_id(
+        store: Arc<S>,
+        name: SubgraphName,
+    ) -> Result<Option<SubgraphId>, Error> {
+        let subgraph_entities = store
+            .find(SubgraphEntity::query().filter(EntityFilter::Equal(
+                "name".to_owned(),
+                name.to_string().into(),
+            )))
+            .map_err(QueryError::from)?;
+        let subgraph_entity = match subgraph_entities.len() {
+            0 => return Ok(None),
+            1 => {
+                let mut subgraph_entities = subgraph_entities;
+                Ok(subgraph_entities.pop().unwrap())
+            }
+            _ => Err(format_err!(
+                "multiple subgraphs found with name {:?}",
+                name.to_string()
+            )),
+        }?;
+        let current_version_id = subgraph_entity
+            .get("currentVersion")
+            .ok_or_else(|| format_err!("Subgraph entity without `currentVersion`"))?
+            .to_owned()
+            .as_string()
+            .map_err(|()| format_err!("Subgraph entity has wrong type in `currentVersion`"))?;
+        let version_entity_opt = store
+            .get(SubgraphVersionEntity::key(current_version_id))
+            .map_err(QueryError::from)?;
+        if version_entity_opt == None {
+            return Ok(None);
+        }
+        let version_entity = version_entity_opt.unwrap();
+        let subgraph_id_str = version_entity
+            .get("state")
+            .ok_or_else(|| format_err!("SubgraphVersion entity without `state`"))?
+            .to_owned()
+            .as_string()
+            .map_err(|()| format_err!("SubgraphVersion entity has wrong type in `state`"))?;
+        SubgraphId::new(subgraph_id_str)
+            .map_err(|()| format_err!("SubgraphVersion entity has invalid subgraph ID in `state`"))
+            .map(Some)
     }
 }
 
 impl<Q, S> SubscriptionServerTrait for SubscriptionServer<Q, S>
 where
     Q: GraphQlRunner,
-    S: SubgraphDeploymentStore,
+    S: SubgraphDeploymentStore + Store,
 {
     type ServeError = ();
 

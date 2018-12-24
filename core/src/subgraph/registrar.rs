@@ -1,30 +1,45 @@
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use graph::data::subgraph::schema::*;
 use graph::prelude::{
     SubgraphDeploymentProvider as SubgraphDeploymentProviderTrait,
     SubgraphRegistrar as SubgraphRegistrarTrait, *,
 };
 
-pub struct SubgraphRegistrar<P, S> {
+pub struct SubgraphRegistrar<L, P, S, CS> {
     logger: Logger,
+    resolver: Arc<L>,
     provider: Arc<P>,
     store: Arc<S>,
+    chain_store: Arc<CS>,
     node_id: NodeId,
     deployment_event_stream_cancel_guard: CancelGuard, // cancels on drop
 }
 
-impl<P, S> SubgraphRegistrar<P, S>
+impl<L, P, S, CS> SubgraphRegistrar<L, P, S, CS>
 where
+    L: LinkResolver,
     P: SubgraphDeploymentProviderTrait,
-    S: SubgraphDeploymentStore,
+    S: Store,
+    CS: ChainStore,
 {
-    pub fn new(logger: Logger, provider: Arc<P>, store: Arc<S>, node_id: NodeId) -> Self {
+    pub fn new(
+        logger: Logger,
+        resolver: Arc<L>,
+        provider: Arc<P>,
+        store: Arc<S>,
+        chain_store: Arc<CS>,
+        node_id: NodeId,
+    ) -> Self {
         let logger = logger.new(o!("component" => "SubgraphRegistrar"));
 
         SubgraphRegistrar {
             logger,
+            resolver,
             provider,
             store,
+            chain_store,
             node_id,
             deployment_event_stream_cancel_guard: CancelGuard::new(),
         }
@@ -61,7 +76,7 @@ where
         // operations idempotent.
 
         // Start event stream
-        let deployment_event_stream = self.store.deployment_events(node_id.clone());
+        let deployment_event_stream = self.deployment_events();
 
         // Deploy named subgraphs found in store
         self.start_deployed_subgraphs().and_then(move |()| {
@@ -90,70 +105,318 @@ where
         })
     }
 
+    pub fn deployment_events(&self) -> impl Stream<Item = DeploymentEvent, Error = Error> + Send {
+        let store = self.store.clone();
+        let node_id = self.node_id.clone();
+
+        store
+            .subscribe(vec![SubgraphDeploymentEntity::subgraph_entity_pair()])
+            .map_err(|()| format_err!("entity change stream failed"))
+            .and_then(
+                move |entity_change| -> Result<Box<Stream<Item = _, Error = _> + Send>, _> {
+                    let subgraph_hash = SubgraphId::new(entity_change.entity_id.clone())
+                        .map_err(|()| format_err!("invalid subgraph hash in deployment entity"))?;
+
+                    match entity_change.operation {
+                        EntityChangeOperation::Added | EntityChangeOperation::Updated => {
+                            store
+                                .get(SubgraphDeploymentEntity::key(subgraph_hash.clone()))
+                                .map_err(|e| format_err!("failed to get entity: {}", e))
+                                .map(|entity_opt| -> Box<Stream<Item = _, Error = _> + Send> {
+                                    if let Some(entity) = entity_opt {
+                                        if entity.get("nodeId") == Some(&node_id.to_string().into())
+                                        {
+                                            // Start subgraph on this node
+                                            Box::new(stream::once(Ok(DeploymentEvent::Add {
+                                                subgraph_id: subgraph_hash,
+                                                node_id: node_id.clone(),
+                                            })))
+                                        } else {
+                                            // Ensure it is removed from this node
+                                            Box::new(stream::once(Ok(DeploymentEvent::Remove {
+                                                subgraph_id: subgraph_hash,
+                                                node_id: node_id.clone(),
+                                            })))
+                                        }
+                                    } else {
+                                        // Was added/updated, but is now gone.
+                                        // We will get a separate Removed event later.
+                                        Box::new(stream::empty())
+                                    }
+                                })
+                        }
+                        EntityChangeOperation::Removed => {
+                            // Send remove event without checking node ID.
+                            // If node ID does not match, then this is a no-op when handled in
+                            // deployment provider.
+                            Ok(Box::new(stream::once(Ok(DeploymentEvent::Remove {
+                                subgraph_id: subgraph_hash,
+                                node_id: node_id.clone(),
+                            }))))
+                        }
+                    }
+                },
+            )
+            .flatten()
+    }
+
     fn start_deployed_subgraphs(&self) -> impl Future<Item = (), Error = Error> {
         let provider = self.provider.clone();
 
-        future::result(self.store.read_by_node_id(self.node_id.clone())).and_then(
-            move |names_and_subgraph_ids| {
-                let provider = provider.clone();
+        // Create a query to find all deployments with this node ID
+        let deployment_query = SubgraphDeploymentEntity::query().filter(EntityFilter::Equal(
+            "nodeId".to_owned(),
+            self.node_id.to_string().into(),
+        ));
 
-                let subgraph_ids = names_and_subgraph_ids
+        future::result(self.store.find(deployment_query))
+            .map_err(|e| format_err!("error querying subgraph deployments: {}", e))
+            .and_then(move |deployment_entities| {
+                deployment_entities
                     .into_iter()
-                    .map(|(_name, id)| id)
-                    .collect::<HashSet<SubgraphId>>();
-
+                    .map(|deployment_entity| {
+                        // Parse as subgraph hash
+                        deployment_entity.id().and_then(|id| {
+                            SubgraphId::new(id).map_err(|()| {
+                                format_err!("invalid subgraph hash in deployment entity")
+                            })
+                        })
+                    })
+                    .collect::<Result<HashSet<SubgraphId>, _>>()
+            })
+            .and_then(move |subgraph_ids| {
+                let provider = provider.clone();
                 stream::iter_ok(subgraph_ids).for_each(move |id| provider.start(id).from_err())
-            },
-        )
+            })
     }
 }
 
-impl<P, S> SubgraphRegistrarTrait for SubgraphRegistrar<P, S>
+impl<L, P, S, CS> SubgraphRegistrarTrait for SubgraphRegistrar<L, P, S, CS>
 where
+    L: LinkResolver,
     P: SubgraphDeploymentProviderTrait,
-    S: SubgraphDeploymentStore,
+    S: Store,
+    CS: ChainStore,
 {
-    fn deploy(
+    fn create_subgraph(
         &self,
-        name: SubgraphDeploymentName,
-        id: SubgraphId,
-        node_id: NodeId,
-    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static> {
-        debug!(
-            self.logger,
-            "Writing deployment entry to store: name = {:?}, subgraph ID = {:?}",
-            name.to_string(),
-            id.to_string()
-        );
+        name: SubgraphName,
+    ) -> Box<Future<Item = (), Error = SubgraphRegistrarError> + Send + 'static> {
+        debug!(self.logger, "Creating subgraph: {:?}", name.to_string());
 
-        Box::new(future::result(self.store.write(name, id, node_id)).from_err())
-    }
+        let mut ops = vec![];
 
-    fn remove(
-        &self,
-        name: SubgraphDeploymentName,
-    ) -> Box<Future<Item = (), Error = SubgraphDeploymentProviderError> + Send + 'static> {
-        debug!(
-            self.logger,
-            "Removing deployment entry from store: {:?}",
-            name.to_string()
-        );
+        // Abort if this subgraph already exists
+        ops.push(EntityOperation::AbortUnless {
+            query: EntityQuery {
+                subgraph_id: SUBGRAPHS_ID.clone(),
+                entity_type: SubgraphEntity::TYPENAME.to_owned(),
+                filter: Some(EntityFilter::Equal(
+                    "name".to_owned(),
+                    name.to_string().into(),
+                )),
+                order_by: None,
+                order_direction: None,
+                range: None,
+            },
+            entity_ids: vec![],
+        });
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let entity = SubgraphEntity::new(name, None, created_at);
+        let entity_id = generate_entity_id();
+        ops.append(&mut entity.write_operations(&entity_id));
 
         Box::new(
-            future::result(self.store.remove(name.clone()))
-                .from_err()
-                .and_then(move |did_remove| {
-                    if did_remove {
-                        Ok(())
-                    } else {
-                        Err(SubgraphDeploymentProviderError::NameNotFound(name.to_string()))
+            future::result(self.store.apply_entity_operations(ops, EventSource::None)).from_err(),
+        )
+    }
+
+    fn create_subgraph_version(
+        &self,
+        name: SubgraphName,
+        hash: SubgraphId,
+        node_id: NodeId,
+    ) -> Box<Future<Item = (), Error = SubgraphRegistrarError> + Send + 'static> {
+        let store = self.store.clone();
+        let chain_store = self.chain_store.clone();
+
+        debug!(
+            self.logger,
+            "Writing new subgraph version to store: subgraph name = {:?}, subgraph hash = {:?}",
+            name.to_string(),
+            hash.to_string()
+        );
+
+        let link = format!("/ipfs/{}", hash);
+
+        Box::new(
+            SubgraphManifest::resolve(Link { link }, self.resolver.clone())
+                .map_err(SubgraphRegistrarError::ResolveError)
+                .and_then(move |manifest| {
+                    // Look up subgraph by name
+                    let subgraph_entities = store
+                        .find(SubgraphEntity::query().filter(EntityFilter::Equal(
+                            "name".to_owned(),
+                            name.to_string().into(),
+                        )))
+                        .map_err(SubgraphRegistrarError::from)?;
+                    let subgraph_entity = match subgraph_entities.len() {
+                        0 => Err(SubgraphRegistrarError::NameNotFound(name.to_string())),
+                        1 => {
+                            let mut subgraph_entities = subgraph_entities;
+                            Ok(subgraph_entities.pop().unwrap())
+                        }
+                        _ => panic!(
+                            "multiple subgraph entities with name {:?}",
+                            name.to_string()
+                        ),
+                    }?;
+                    let subgraph_entity_id =
+                        subgraph_entity.id().map_err(SubgraphRegistrarError::from)?;
+
+                    // Check if subgraph state already exists for this hash
+                    let state_entities = store
+                        .find(SubgraphStateEntity::query().filter(EntityFilter::Equal(
+                            "id".to_owned(),
+                            hash.to_string().into(),
+                        )))
+                        .map_err(SubgraphRegistrarError::from)?;
+                    let state_exists = match state_entities.len() {
+                        0 => false,
+                        1 => true,
+                        _ => panic!(
+                            "multiple subgraph states found for hash {}",
+                            hash.to_string()
+                        ),
+                    };
+
+                    // Prepare entity ops transaction
+                    let mut ops = vec![
+                        // Subgraph entity must still exist, have same name
+                        EntityOperation::AbortUnless {
+                            query: SubgraphEntity::query().filter(EntityFilter::Equal(
+                                "name".to_owned(),
+                                name.to_string().into(),
+                            )),
+                            entity_ids: vec![subgraph_entity_id.clone()],
+                        },
+                        // Subgraph state entity must continue to exist/not exist
+                        EntityOperation::AbortUnless {
+                            query: SubgraphStateEntity::query().filter(EntityFilter::Equal(
+                                "id".to_owned(),
+                                hash.to_string().into(),
+                            )),
+                            entity_ids: if state_exists {
+                                vec![hash.to_string()]
+                            } else {
+                                vec![]
+                            },
+                        },
+                    ];
+
+                    let version_entity_id = generate_entity_id();
+                    let created_at = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    ops.append(
+                        &mut SubgraphVersionEntity::new(
+                            subgraph_entity_id.clone(),
+                            hash.clone(),
+                            created_at,
+                        )
+                        .write_operations(&version_entity_id),
+                    );
+
+                    // Create state only if it does not exist already
+                    if !state_exists {
+                        let chain_head_ptr_opt = chain_store
+                            .chain_head_ptr()
+                            .map_err(SubgraphRegistrarError::from)?;
+                        let chain_head_block_number = match chain_head_ptr_opt {
+                            Some(chain_head_ptr) => chain_head_ptr.number,
+                            None => 0,
+                        };
+                        let genesis_block_ptr = chain_store
+                            .genesis_block_ptr()
+                            .map_err(SubgraphRegistrarError::from)?;
+                        ops.append(
+                            &mut SubgraphStateEntity::new(
+                                &manifest,
+                                false,
+                                genesis_block_ptr,
+                                chain_head_block_number,
+                            )
+                            .create_operations(&hash),
+                        );
                     }
+
+                    ops.append(
+                        &mut SubgraphDeploymentEntity::new(node_id, false).write_operations(&hash),
+                    );
+
+                    // TODO support delayed update of currentVersion
+                    ops.append(&mut SubgraphEntity::update_current_version_operations(
+                        &subgraph_entity_id,
+                        &version_entity_id,
+                    ));
+
+                    // Commit entity ops
+                    // TODO retry on abort
+                    store
+                        .apply_entity_operations(ops, EventSource::None)
+                        .map_err(SubgraphRegistrarError::from)
                 }),
         )
     }
 
-    fn list(&self) -> Result<Vec<(SubgraphDeploymentName, SubgraphId)>, Error> {
-        self.store.read_by_node_id(self.node_id.clone())
+    fn remove_subgraph(
+        &self,
+        name: SubgraphName,
+    ) -> Box<Future<Item = (), Error = SubgraphRegistrarError> + Send + 'static> {
+        debug!(self.logger, "Removing subgraph: {:?}", name.to_string());
+
+        // TODO remove other entities related to subgraph
+        Box::new(future::result(
+            self.store
+                .find(EntityQuery {
+                    subgraph_id: SUBGRAPHS_ID.clone(),
+                    entity_type: SubgraphEntity::TYPENAME.to_owned(),
+                    filter: Some(EntityFilter::Equal(
+                        "name".to_owned(),
+                        name.to_string().into(),
+                    )),
+                    order_by: None,
+                    order_direction: None,
+                    range: None,
+                })
+                .map_err(|e| format_err!("query execution error: {}", e))
+                .map_err(SubgraphRegistrarError::from)
+                .and_then(|matching_subgraphs| {
+                    let subgraph = match matching_subgraphs.as_slice() {
+                        [] => Err(SubgraphRegistrarError::NameNotFound(name.to_string())),
+                        [subgraph] => Ok(subgraph),
+                        _ => panic!("multiple subgraphs with same name in store"),
+                    }?;
+
+                    let ops = SubgraphEntity::remove_operations(&subgraph.id()?);
+                    self.store
+                        .apply_entity_operations(ops, EventSource::None)
+                        .map_err(SubgraphRegistrarError::from)
+                }),
+        ))
+    }
+
+    fn list_subgraphs(
+        &self,
+    ) -> Box<Future<Item = Vec<SubgraphName>, Error = SubgraphRegistrarError> + Send + 'static>
+    {
+        unimplemented!()
+        //self.store.read_by_node_id(self.node_id.clone())
     }
 }
 
@@ -171,7 +434,6 @@ where
 
     match event {
         DeploymentEvent::Add {
-            deployment_name: _,
             subgraph_id,
             node_id: _,
         } => {
@@ -198,7 +460,6 @@ where
             )
         }
         DeploymentEvent::Remove {
-            deployment_name: _,
             subgraph_id,
             node_id: _,
         } => Box::new(

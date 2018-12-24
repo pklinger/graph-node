@@ -1,5 +1,3 @@
-use components::link_resolver::LinkResolver;
-use data::schema::Schema;
 use ethabi::Contract;
 use failure;
 use failure::{Error, SyncFailure};
@@ -14,6 +12,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::prelude::*;
 use web3::types::Address;
+
+use components::link_resolver::LinkResolver;
+use data::query::QueryExecutionError;
+use data::schema::Schema;
 
 /// Rust representation of the GraphQL schema for a `SubgraphManifest`.
 pub mod schema;
@@ -77,49 +79,83 @@ impl<'de> de::Deserialize<'de> for SubgraphId {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum SubgraphDeploymentStatus {
-    /// Initial state for new subgraphs. Valid next states are `Synced`, `Failed`, and `Paused`.
-    ///
-    /// Subgraphs stay in this state until they have caught up to the head block, at which point
-    /// they become `Synced`.
-    Syncing,
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubgraphName(String);
 
-    /// Subgraphs spend most of their time here. Valid next states are `Failed` and `Paused`.
-    ///
-    /// As new blocks arrive, a subgraph will temporarily fall behind the head block pointer again.
-    /// This does not affect the subgraph status; the subgraph remains in the `Synced` state.
-    ///
-    /// The separation between `Syncing` and `Synced` states is to make it easier to monitor system
-    /// health. It is normal for subgraphs in the `Syncing` state to be far behind the chain's head
-    /// block, while it is abnormal for subgraphs in the `Synced` state to be far behind the
-    /// chain's head block.
-    Synced,
+impl SubgraphName {
+    pub fn new(s: impl Into<String>) -> Result<Self, ()> {
+        let s = s.into();
 
-    /// When block processing encounters an error. Valid next state is `Syncing` (if user forces retry).
-    Failed,
+        // Note: these validation rules must be kept consistent with the validation rules
+        // implemented in any other components that rely on subgraph names.
 
-    /// Subgraph has stopped processing new blocks. Valid next state is `Syncing`.
-    Paused,
+        // Enforce length limits
+        if s.len() < 1 || s.len() > 255 {
+            return Err(());
+        }
+
+        // Check that the name contains only allowed characters.
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/')
+        {
+            return Err(());
+        }
+
+        // Check that name does not start or end with a special character
+        // Note: we may in the future split names by '/' and do this check on each name "part".
+        let first_char = s.chars().next().unwrap(); // length >= 1, checked earlier
+        let last_char = s.chars().last().unwrap(); // length >= 1, checked earlier
+        if !first_char.is_ascii_alphanumeric() || !last_char.is_ascii_alphanumeric() {
+            return Err(());
+        }
+
+        Ok(SubgraphName(s))
+    }
 }
 
-impl fmt::Display for SubgraphDeploymentStatus {
+impl fmt::Display for SubgraphName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            SubgraphDeploymentStatus::Syncing => write!(f, "SYNCING"),
-            SubgraphDeploymentStatus::Synced => write!(f, "SYNCED"),
-            SubgraphDeploymentStatus::Failed => write!(f, "FAILED"),
-            SubgraphDeploymentStatus::Paused => write!(f, "PAUSED"),
-        }
+        self.0.fmt(f)
+    }
+}
+
+impl ser::Serialize for SubgraphName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> de::Deserialize<'de> for SubgraphName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s: String = de::Deserialize::deserialize(deserializer)?;
+        SubgraphName::new(s.clone())
+            .map_err(|()| de::Error::invalid_value(de::Unexpected::Str(&s), &"valid subgraph name"))
     }
 }
 
 #[derive(Fail, Debug)]
 pub enum SubgraphRegistrarError {
+    #[fail(display = "subgraph resolve error: {}", _0)]
+    ResolveError(SubgraphManifestResolveError),
     #[fail(display = "subgraph name not found: {}", _0)]
     NameNotFound(String),
-    #[fail(display = "subgraph provider error: {}", _0)]
+    #[fail(display = "subgraph registrar internal query error: {}", _0)]
+    QueryExecutionError(QueryExecutionError),
+    #[fail(display = "subgraph registrar error: {}", _0)]
     Unknown(failure::Error),
+}
+
+impl From<QueryExecutionError> for SubgraphRegistrarError {
+    fn from(e: QueryExecutionError) -> Self {
+        SubgraphRegistrarError::QueryExecutionError(e)
+    }
 }
 
 impl From<Error> for SubgraphRegistrarError {

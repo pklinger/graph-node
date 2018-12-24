@@ -1495,8 +1495,8 @@ fn entity_changes_are_fired_and_forwarded_to_subscriptions() {
 #[test]
 fn write_and_read_deployments() {
     run_test(|store| -> Result<(), ()> {
-        let name1 = SubgraphDeploymentName::new("name1").unwrap();
-        let name2 = SubgraphDeploymentName::new("name2").unwrap();
+        let name1 = SubgraphName::new("name1").unwrap();
+        let name2 = SubgraphName::new("name2").unwrap();
         let subgraph_id1 = SubgraphId::new("mysubgraph").unwrap();
         let subgraph_id2 = SubgraphId::new("mysubgraph2").unwrap();
         let subgraph_id3 = SubgraphId::new("mysubgraph3").unwrap();
@@ -1539,8 +1539,8 @@ fn write_and_read_deployments() {
 #[test]
 fn write_and_delete_deployments() {
     run_test(|store| -> Result<(), ()> {
-        let name1 = SubgraphDeploymentName::new("name1").unwrap();
-        let name2 = SubgraphDeploymentName::new("name2").unwrap();
+        let name1 = SubgraphName::new("name1").unwrap();
+        let name2 = SubgraphName::new("name2").unwrap();
         let subgraph_id1 = SubgraphId::new("mysubgraph").unwrap();
         let node_id = NodeId::new("thisnode").unwrap();
 
@@ -1571,7 +1571,7 @@ fn write_and_delete_deployments() {
 #[test]
 fn receive_deployment_events() {
     run_test(|store| {
-        let name1 = SubgraphDeploymentName::new("name1").unwrap();
+        let name1 = SubgraphName::new("name1").unwrap();
         let subgraph_id1 = SubgraphId::new("mysubgraph").unwrap();
         let node_id1 = NodeId::new("thisnode").unwrap();
         let node_id2 = NodeId::new("othernode").unwrap();

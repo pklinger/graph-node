@@ -1,6 +1,5 @@
 use futures::sync::mpsc::{channel, Receiver, Sender};
-use graph::components::subgraph::SubgraphDeploymentProviderEvent;
-use graph::data::subgraph::schema::SubgraphDeploymentEntity;
+use graph::data::subgraph::schema::SubgraphStateEntity;
 use graph::prelude::{SubgraphInstance as SubgraphInstanceTrait, *};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -267,10 +266,8 @@ impl SubgraphInstanceManager {
                         );
 
                         // Set subgraph status to Failed
-                        let status_ops = SubgraphDeploymentEntity::write_status_operations(
-                            &id_for_err,
-                            SubgraphDeploymentStatus::Failed,
-                        );
+                        let status_ops =
+                            SubgraphStateEntity::update_failed_operations(&id_for_err, true);
                         if let Err(e) =
                             store_for_errors.apply_entity_operations(status_ops, EventSource::None)
                         {
@@ -298,7 +295,9 @@ impl SubgraphInstanceManager {
 
 impl EventConsumer<SubgraphDeploymentProviderEvent> for SubgraphInstanceManager {
     /// Get the wrapped event sink.
-    fn event_sink(&self) -> Box<Sink<SinkItem = SubgraphDeploymentProviderEvent, SinkError = ()> + Send> {
+    fn event_sink(
+        &self,
+    ) -> Box<Sink<SinkItem = SubgraphDeploymentProviderEvent, SinkError = ()> + Send> {
         let logger = self.logger.clone();
         Box::new(self.input.clone().sink_map_err(move |e| {
             error!(logger, "Component was dropped: {}", e);

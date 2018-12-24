@@ -1,9 +1,7 @@
 use futures::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use graph::data::subgraph::schema::SubgraphDeploymentEntity;
 use graph::prelude::{SubgraphDeploymentProvider as SubgraphDeploymentProviderTrait, *};
 
 pub struct SubgraphDeploymentProvider<L, S> {
@@ -71,35 +69,10 @@ where
                         .unwrap()
                         .insert(subgraph.id.clone())
                     {
-                        return Box::new(future::err(SubgraphDeploymentProviderError::AlreadyRunning(
-                            subgraph.id,
-                        )));
+                        return Box::new(future::err(
+                            SubgraphDeploymentProviderError::AlreadyRunning(subgraph.id),
+                        ));
                     }
-
-                    // Place subgraph info into store
-                    let created_at = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    let entity_ops = SubgraphDeploymentEntity::new(
-                        &subgraph,
-                        NodeId::new("nodeid").unwrap(), // TODO
-                        SubgraphDeploymentStatus::Syncing,
-                        0,
-                        0,
-                        created_at,
-                    )
-                    .write_operations();
-                    self_clone
-                        .store
-                        .apply_entity_operations(entity_ops, EventSource::None)
-                        .map_err(|err| {
-                            error!(
-                                self_clone.logger,
-                                "Failed to write subgraph to store: {}", err
-                            )
-                        })
-                        .ok();
 
                     // Send events to trigger subgraph processing
                     Box::new(
@@ -138,8 +111,8 @@ impl<L, S> EventProducer<SubgraphDeploymentProviderEvent> for SubgraphDeployment
     fn take_event_stream(
         &mut self,
     ) -> Option<Box<Stream<Item = SubgraphDeploymentProviderEvent, Error = ()> + Send>> {
-        self.event_stream
-            .take()
-            .map(|s| Box::new(s) as Box<Stream<Item = SubgraphDeploymentProviderEvent, Error = ()> + Send>)
+        self.event_stream.take().map(|s| {
+            Box::new(s) as Box<Stream<Item = SubgraphDeploymentProviderEvent, Error = ()> + Send>
+        })
     }
 }

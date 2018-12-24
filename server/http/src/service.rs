@@ -1,5 +1,5 @@
 use graph::components::server::query::GraphQLServerError;
-use graph::data::subgraph::schema::SUBGRAPHS_ID;
+use graph::data::subgraph::schema::{SubgraphEntity, SubgraphVersionEntity, SUBGRAPHS_ID};
 use graph::prelude::*;
 use http::header;
 use hyper::service::Service;
@@ -35,7 +35,7 @@ impl<Q, S> Clone for GraphQLService<Q, S> {
 impl<Q, S> GraphQLService<Q, S>
 where
     Q: GraphQlRunner,
-    S: SubgraphDeploymentStore,
+    S: SubgraphDeploymentStore + Store,
 {
     /// Creates a new GraphQL service.
     pub fn new(graphql_runner: Arc<Q>, store: Arc<S>, ws_port: u16, node_id: NodeId) -> Self {
@@ -55,37 +55,45 @@ where
     fn index(&self) -> GraphQLServiceResponse {
         let service = self.clone();
 
+        let entity_query = SubgraphEntity::query().range(EntityRange {
+            first: 2, // Ask for two to find out if there is more than one
+            skip: 0,
+        });
+
         Box::new(
-            future::result(self.store.read_by_node_id(self.node_id.clone()))
+            future::result(self.store.find(entity_query))
                 .map_err(|e| GraphQLServerError::InternalError(e.to_string()))
-                .and_then(
-                    move |mut subgraph_name_mappings| -> GraphQLServiceResponse {
-                        // If there is only one subgraph, redirect to it
-                        match subgraph_name_mappings.len() {
-                            0 => Box::new(future::ok(
-                                Response::builder()
-                                    .status(200)
-                                    .body(Body::from(String::from("No subgraphs deployed yet")))
-                                    .unwrap(),
-                            )),
-                            1 => {
-                                let (name, _subgraph_id) = subgraph_name_mappings.pop().unwrap();
-                                return service
-                                    .handle_temp_redirect(&format!("/subgraphs/name/{}", name));
-                            }
-                            _ => Box::new(future::ok(
-                                Response::builder()
-                                    .status(200)
-                                    .body(Body::from(String::from(
-                                        "Multiple subgraphs deployed. \
-                                         Try /subgraphs/id/<ID> or \
-                                         /subgraphs/name/<NAME>",
-                                    )))
-                                    .unwrap(),
-                            )),
+                .and_then(move |mut subgraph_entities| -> GraphQLServiceResponse {
+                    // If there is only one subgraph, redirect to it
+                    match subgraph_entities.len() {
+                        0 => Box::new(future::ok(
+                            Response::builder()
+                                .status(200)
+                                .body(Body::from(String::from("No subgraphs deployed yet")))
+                                .unwrap(),
+                        )),
+                        1 => {
+                            let subgraph_entity = subgraph_entities.pop().unwrap();
+                            let subgraph_name = subgraph_entity
+                                .get("name")
+                                .expect("subgraph entity without name");
+                            return service.handle_temp_redirect(&format!(
+                                "/subgraphs/name/{}",
+                                subgraph_name
+                            ));
                         }
-                    },
-                ),
+                        _ => Box::new(future::ok(
+                            Response::builder()
+                                .status(200)
+                                .body(Body::from(String::from(
+                                    "Multiple subgraphs deployed. \
+                                     Try /subgraphs/id/<ID> or \
+                                     /subgraphs/name/<NAME>",
+                                )))
+                                .unwrap(),
+                        )),
+                    }
+                }),
         )
     }
 
@@ -115,33 +123,95 @@ where
 
     fn handle_graphql_query_by_name(
         &self,
-        name: &str,
+        subgraph_name: &str,
         request: Request<Body>,
     ) -> GraphQLServiceResponse {
-        let name = name.to_owned();
         let service = self.clone();
 
         Box::new(
-            future::result(SubgraphDeploymentName::new(name.clone()))
-                .map_err(move |()| {
-                    GraphQLServerError::ClientError(format!("invalid subgraph name {:?}", name))
+            SubgraphName::new(subgraph_name)
+                .map_err(|()| {
+                    GraphQLServerError::ClientError(format!(
+                        "invalid subgraph name {:?}",
+                        subgraph_name
+                    ))
                 })
-                .and_then(move |name| {
-                    future::result(service.store.read(name.clone()))
-                        .map_err(|e| GraphQLServerError::InternalError(e.to_string()))
-                        .and_then(move |deployment_opt| {
-                            deployment_opt.ok_or_else(|| {
-                                GraphQLServerError::ClientError(format!(
-                                    "subgraph with name {:?} not found",
-                                    name.to_string()
-                                ))
-                            })
-                        })
-                        .and_then(move |(subgraph_id, _node_id)| {
-                            service.handle_graphql_query(subgraph_id, request.into_body())
-                        })
+                .and_then(|subgraph_name| self.resolve_subgraph_name_to_id(subgraph_name))
+                .into_future()
+                .and_then(move |subgraph_id| {
+                    service.handle_graphql_query(subgraph_id, request.into_body())
                 }),
         )
+    }
+
+    fn resolve_subgraph_name_to_id(
+        &self,
+        name: SubgraphName,
+    ) -> Result<SubgraphId, GraphQLServerError> {
+        let subgraph_entities = self
+            .store
+            .find(SubgraphEntity::query().filter(EntityFilter::Equal(
+                "name".to_owned(),
+                name.to_string().into(),
+            )))
+            .map_err(QueryError::from)?;
+        let subgraph_entity = match subgraph_entities.len() {
+            0 => Err(GraphQLServerError::ClientError(format!(
+                "subgraph with name {:?} not found",
+                name.to_string()
+            ))),
+            1 => {
+                let mut subgraph_entities = subgraph_entities;
+                Ok(subgraph_entities.pop().unwrap())
+            }
+            _ => Err(GraphQLServerError::InternalError(format!(
+                "multiple subgraphs found with name {:?}",
+                name.to_string()
+            ))),
+        }?;
+        let current_version_id = subgraph_entity
+            .get("currentVersion")
+            .ok_or_else(|| {
+                GraphQLServerError::InternalError(
+                    "Subgraph entity without `currentVersion`".to_owned(),
+                )
+            })?
+            .to_owned()
+            .as_string()
+            .map_err(|()| {
+                GraphQLServerError::InternalError(
+                    "Subgraph entity has wrong type in `currentVersion`".to_owned(),
+                )
+            })?;
+        let version_entity = self
+            .store
+            .get(SubgraphVersionEntity::key(current_version_id))
+            .map_err(QueryError::from)?
+            .ok_or_else(|| {
+                GraphQLServerError::ClientError(format!(
+                    "subgraph with name {:?} not found",
+                    name.to_string()
+                ))
+            })?;
+        let subgraph_id_str = version_entity
+            .get("state")
+            .ok_or_else(|| {
+                GraphQLServerError::InternalError(
+                    "SubgraphVersion entity without `state`".to_owned(),
+                )
+            })?
+            .to_owned()
+            .as_string()
+            .map_err(|()| {
+                GraphQLServerError::InternalError(
+                    "SubgraphVersion entity has wrong type in `state`".to_owned(),
+                )
+            })?;
+        SubgraphId::new(subgraph_id_str).map_err(|()| {
+            GraphQLServerError::InternalError(
+                "SubgraphVersion entity has invalid subgraph ID in `state`".to_owned(),
+            )
+        })
     }
 
     fn handle_graphql_query_by_id(
@@ -176,9 +246,10 @@ where
         let schema = match self.store.subgraph_schema(id) {
             Ok(schema) => schema,
             Err(e) => {
+                println!("handle_graphql_query: schema error: {}", e);
                 return Box::new(future::err(GraphQLServerError::InternalError(
                     e.to_string(),
-                )))
+                )));
             }
         };
 
@@ -240,7 +311,7 @@ where
 impl<Q, S> Service for GraphQLService<Q, S>
 where
     Q: GraphQlRunner,
-    S: SubgraphDeploymentStore,
+    S: SubgraphDeploymentStore + Store,
 {
     type ReqBody = Body;
     type ResBody = Body;

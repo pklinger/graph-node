@@ -1,135 +1,327 @@
+//! Entity types that contain the graph-node state.
+//!
+//! Entity type methods follow these naming conventions:
+//! - `*_operations`: Method does not have any side effects, but returns a sequence of operations
+//!   to be provided to `Store::apply_entity_operations`.
+//! - `create_*_operations`: Create an entity, unless the entity already exists (in which case the
+//!   transaction is aborted).
+//! - `update_*_operations`: Update an entity, unless the entity does not exist (in which case the
+//!   transaction is aborted).
+//! - `write_*_operations`: Create an entity or update an existing entity.
+//! - `remove_*_operations`: Remove an entity, if it exists. Does not abort if entity does not
+//!   exist.
+//!
 //! See `subgraphs.graphql` in the store for corresponding graphql schema.
 
 use hex;
-use rand::Rng;
 use rand::rngs::OsRng;
-use std::collections::HashMap;
+use rand::Rng;
+use web3::types::*;
 
 use super::SubgraphId;
-use components::store::{EntityKey, EntityOperation};
-use data::store::{Entity, NodeId, Value};
-use data::subgraph::SubgraphDeploymentStatus;
+use components::ethereum::EthereumBlockPointer;
+use components::store::{EntityFilter, EntityKey, EntityOperation, EntityQuery};
+use data::store::{Entity, NodeId, SubgraphEntityPair, Value};
+use data::subgraph::{SubgraphManifest, SubgraphName};
 
 /// ID of the subgraph of subgraphs.
 lazy_static! {
     pub static ref SUBGRAPHS_ID: SubgraphId = SubgraphId::new("subgraphs").unwrap();
 }
 
+/// Generic type for the entity types defined below.
+pub trait TypedEntity {
+    const TYPENAME: &'static str;
+    type IdType: ToString;
+
+    fn query() -> EntityQuery {
+        EntityQuery::new(SUBGRAPHS_ID.clone(), Self::TYPENAME)
+    }
+
+    fn subgraph_entity_pair() -> SubgraphEntityPair {
+        (SUBGRAPHS_ID.clone(), Self::TYPENAME.to_owned())
+    }
+
+    fn key(entity_id: Self::IdType) -> EntityKey {
+        let (subgraph_id, entity_type) = Self::subgraph_entity_pair();
+        EntityKey {
+            subgraph_id,
+            entity_type,
+            entity_id: entity_id.to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SubgraphEntity {
-    name: String,
+    name: SubgraphName,
     current_version_id: Option<String>,
     created_at: u64,
 }
 
+impl TypedEntity for SubgraphEntity {
+    const TYPENAME: &'static str = "Subgraph";
+    type IdType = String;
+}
+
 impl SubgraphEntity {
-    pub const TYPENAME: &'static str = "Subgraph";
+    pub fn new(
+        name: SubgraphName,
+        current_version_id: Option<String>,
+        created_at: u64,
+    ) -> SubgraphEntity {
+        SubgraphEntity {
+            name: name,
+            current_version_id,
+            created_at,
+        }
+    }
 
     pub fn write_operations(self, id: &str) -> Vec<EntityOperation> {
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.to_owned().into());
-        entity.insert("currentVersion".to_owned(), self.current_version_id.into());
-        entity.insert("createdAt".to_owned(), self.created_at.into());
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("name", self.name.to_string());
+        entity.set("currentVersion", self.current_version_id);
+        entity.set("createdAt", self.created_at);
         vec![set_entity_operation(Self::TYPENAME, id, entity)]
+    }
+
+    pub fn remove_operations(id: &str) -> Vec<EntityOperation> {
+        vec![remove_entity_operation(Self::TYPENAME, id)]
+    }
+
+    pub fn update_current_version_operations(id: &str, version_id: &str) -> Vec<EntityOperation> {
+        let mut ops = vec![];
+
+        // Abort unless entity exists
+        ops.push(EntityOperation::AbortUnless {
+            query: Self::query().filter(EntityFilter::Equal("id".to_owned(), id.to_owned().into())),
+            entity_ids: vec![id.to_owned()],
+        });
+
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("currentVersion", version_id);
+        ops.push(set_entity_operation(Self::TYPENAME, id, entity));
+
+        ops
     }
 }
 
 #[derive(Debug)]
 pub struct SubgraphVersionEntity {
     subgraph_id: String,
-    deployment_id: SubgraphId,
+    state_subgraph_hash: SubgraphId,
     created_at: u64,
 }
 
+impl TypedEntity for SubgraphVersionEntity {
+    const TYPENAME: &'static str = "SubgraphVersion";
+    type IdType = String;
+}
+
 impl SubgraphVersionEntity {
-    pub const TYPENAME: &'static str = "SubgraphVersion";
+    pub fn new(subgraph_id: String, subgraph_hash: SubgraphId, created_at: u64) -> Self {
+        Self {
+            subgraph_id,
+            state_subgraph_hash: subgraph_hash,
+            created_at,
+        }
+    }
 
     pub fn write_operations(self, id: &str) -> Vec<EntityOperation> {
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.to_owned().into());
-        entity.insert("subgraph".to_owned(), self.subgraph_id.into());
-        entity.insert("deployment".to_owned(), self.deployment_id.to_string().into());
-        entity.insert("createdAt".to_owned(), self.created_at.into());
+        let mut entity = Entity::new();
+        entity.set("id", id.to_owned());
+        entity.set("subgraph", self.subgraph_id);
+        entity.set("state", self.state_subgraph_hash.to_string());
+        entity.set("createdAt", self.created_at);
         vec![set_entity_operation(Self::TYPENAME, id, entity)]
     }
 }
 
 #[derive(Debug)]
-pub struct SubgraphDeploymentEntity {
-    id: SubgraphId,
-    node_id: NodeId,
+pub struct SubgraphStateEntity {
     manifest: SubgraphManifestEntity,
-    status: SubgraphDeploymentStatus,
-    processed_ethereum_blocks_count: u64,
+    failed: bool,
+    latest_ethereum_block_hash: H256,
+    latest_ethereum_block_number: u64,
     total_ethereum_blocks_count: u64,
-    created_at: u64,
 }
 
-impl SubgraphDeploymentEntity {
-    pub const TYPENAME: &'static str = "SubgraphDeployment";
+impl TypedEntity for SubgraphStateEntity {
+    const TYPENAME: &'static str = "SubgraphState";
+    type IdType = SubgraphId;
+}
 
+impl SubgraphStateEntity {
     pub fn new(
-        source_manifest: &super::SubgraphManifest,
-        node_id: NodeId,
-        status: SubgraphDeploymentStatus,
-        processed_ethereum_blocks_count: u64,
+        source_manifest: &SubgraphManifest,
+        failed: bool,
+        latest_ethereum_block: EthereumBlockPointer,
         total_ethereum_blocks_count: u64,
-        created_at: u64,
     ) -> Self {
         Self {
-            id: source_manifest.id.clone(),
-            node_id,
             manifest: SubgraphManifestEntity::from(source_manifest),
-            status,
-            processed_ethereum_blocks_count,
+            failed,
+            latest_ethereum_block_hash: latest_ethereum_block.hash,
+            latest_ethereum_block_number: latest_ethereum_block.number,
             total_ethereum_blocks_count,
-            created_at,
         }
     }
 
-    pub fn write_operations(self) -> Vec<EntityOperation> {
+    pub fn create_operations(self, id: &SubgraphId) -> Vec<EntityOperation> {
         let mut ops = vec![];
 
-        let manifest_id = SubgraphManifestEntity::id(&self.id);
+        // Abort unless no entity exists with this ID
+        ops.push(EntityOperation::AbortUnless {
+            query: Self::query()
+                .filter(EntityFilter::Equal("id".to_owned(), id.to_string().into())),
+            entity_ids: vec![],
+        });
+
+        let manifest_id = SubgraphManifestEntity::id(&id);
         ops.append(&mut self.manifest.write_operations(&manifest_id));
 
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), self.id.to_string().into());
-        entity.insert("nodeId".to_owned(), self.node_id.to_string().into());
-        entity.insert("manifest".to_owned(), manifest_id.into());
-        entity.insert("status".to_owned(), self.status.to_string().into());
-        entity.insert(
-            "processedEthereumBlocksCount".to_owned(),
-            self.processed_ethereum_blocks_count.into(),
+        let mut entity = Entity::new();
+        entity.set("id", id.to_string());
+        entity.set("manifest", manifest_id);
+        entity.set("failed", self.failed);
+        entity.set(
+            "latestEthereumBlockHash",
+            format!("{:x}", self.latest_ethereum_block_hash),
         );
-        entity.insert(
-            "totalEthereumBlocksCount".to_owned(),
-            self.total_ethereum_blocks_count.into(),
+        entity.set(
+            "latestEthereumBlockNumber",
+            self.latest_ethereum_block_number,
         );
-        entity.insert("createdAt".to_owned(), self.created_at.into());
-        ops.push(set_entity_operation(Self::TYPENAME, self.id.to_string(), entity));
+        entity.set("totalEthereumBlocksCount", self.total_ethereum_blocks_count);
+        ops.push(set_entity_operation(Self::TYPENAME, id.to_string(), entity));
 
         ops
     }
 
-    pub fn write_status_operations(
+    pub fn update_ethereum_block_pointer_operations(
         id: &SubgraphId,
-        status: SubgraphDeploymentStatus,
+        block_ptr_from: EthereumBlockPointer,
+        block_ptr_to: EthereumBlockPointer,
     ) -> Vec<EntityOperation> {
-        let mut entity = HashMap::new();
-        entity.insert("status".to_owned(), status.to_string().into());
+        let mut ops = vec![];
+
+        // Abort unless current block pointer matches block_ptr_from
+        ops.push(EntityOperation::AbortUnless {
+            query: Self::query().filter(EntityFilter::And(vec![
+                EntityFilter::Equal("id".to_owned(), id.to_string().into()),
+                EntityFilter::Equal(
+                    "latestEthereumBlockHash".to_owned(),
+                    block_ptr_from.hash_hex().into(),
+                ),
+                EntityFilter::Equal(
+                    "latestEthereumBlockNumber".to_owned(),
+                    block_ptr_from.number.into(),
+                ),
+            ])),
+            entity_ids: vec![id.to_string()],
+        });
+
+        let mut entity = Entity::new();
+        entity.set("id", id.to_string());
+        entity.set("latestEthereumBlockHash", block_ptr_to.hash_hex());
+        entity.set("latestEthereumBlockNumber", block_ptr_to.number);
+        ops.push(set_entity_operation(Self::TYPENAME, id.to_string(), entity));
+
+        ops
+    }
+
+    pub fn update_ethereum_blocks_count_operations(
+        id: &SubgraphId,
+        total_blocks_count: u64,
+    ) -> Vec<EntityOperation> {
+        let mut ops = vec![];
+
+        // Abort unless entity exists
+        ops.push(EntityOperation::AbortUnless {
+            query: Self::query().filter(EntityFilter::And(vec![EntityFilter::Equal(
+                "id".to_owned(),
+                id.to_string().into(),
+            )])),
+            entity_ids: vec![id.to_string()],
+        });
+
+        let mut entity = Entity::new();
+        entity.set("id", id.to_string());
+        entity.set("totalEthereumBlocksCount", total_blocks_count);
+        ops.push(set_entity_operation(Self::TYPENAME, id.to_string(), entity));
+
+        ops
+    }
+
+    pub fn update_failed_operations(id: &SubgraphId, failed: bool) -> Vec<EntityOperation> {
+        let mut ops = vec![];
+
+        // Abort unless entity exists
+        ops.push(EntityOperation::AbortUnless {
+            query: Self::query().filter(EntityFilter::And(vec![EntityFilter::Equal(
+                "id".to_owned(),
+                id.to_string().into(),
+            )])),
+            entity_ids: vec![id.to_string()],
+        });
+
+        let mut entity = Entity::new();
+        entity.set("id", id.to_string());
+        entity.set("failed", failed);
+        ops.push(set_entity_operation(Self::TYPENAME, id.to_string(), entity));
+
+        ops
+    }
+}
+
+#[derive(Debug)]
+pub struct SubgraphDeploymentEntity {
+    node_id: NodeId,
+    synced: bool,
+}
+
+impl TypedEntity for SubgraphDeploymentEntity {
+    const TYPENAME: &'static str = "SubgraphDeployment";
+    type IdType = SubgraphId;
+}
+
+impl SubgraphDeploymentEntity {
+    pub fn new(node_id: NodeId, synced: bool) -> Self {
+        Self { node_id, synced }
+    }
+
+    pub fn write_operations(self, id: &SubgraphId) -> Vec<EntityOperation> {
+        let mut entity = Entity::new();
+        entity.set("id", id.to_string());
+        entity.set("nodeId", self.node_id.to_string());
+        entity.set("synced", self.synced);
         vec![set_entity_operation(Self::TYPENAME, id.to_string(), entity)]
     }
 
-    pub fn write_ethereum_block_counts_operations(
+    pub fn update_synced_operations(
         id: &SubgraphId,
-        processed: u64,
-        total: u64,
+        node_id: NodeId,
+        synced: bool,
     ) -> Vec<EntityOperation> {
-        let mut entity = HashMap::new();
-        entity.insert("processedEthereumBlocksCount".to_owned(), processed.into());
-        entity.insert("totalEthereumBlocksCount".to_owned(), total.into());
-        vec![set_entity_operation(Self::TYPENAME, id.to_string(), entity)]
+        let mut ops = vec![];
+
+        // Abort unless entity exists and still has the expected node ID
+        ops.push(EntityOperation::AbortUnless {
+            query: Self::query().filter(EntityFilter::And(vec![
+                EntityFilter::Equal("id".to_owned(), id.to_string().into()),
+                EntityFilter::Equal("nodeId".to_owned(), node_id.to_string().into()),
+            ])),
+            entity_ids: vec![id.to_string()],
+        });
+
+        let mut entity = Entity::new();
+        entity.set("id", id.to_string());
+        entity.set("synced", synced);
+        ops.push(set_entity_operation(Self::TYPENAME, id.to_string(), entity));
+
+        ops
     }
 }
 
@@ -142,9 +334,12 @@ pub struct SubgraphManifestEntity {
     data_sources: Vec<EthereumContractDataSourceEntity>,
 }
 
-impl SubgraphManifestEntity {
-    pub const TYPENAME: &'static str = "SubgraphManifest";
+impl TypedEntity for SubgraphManifestEntity {
+    const TYPENAME: &'static str = "SubgraphManifest";
+    type IdType = String;
+}
 
+impl SubgraphManifestEntity {
     pub fn id(subgraph_id: &SubgraphId) -> String {
         format!("{}-manifest", subgraph_id)
     }
@@ -159,13 +354,13 @@ impl SubgraphManifestEntity {
             data_source_ids.push(data_source_id.into());
         }
 
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.clone().into());
-        entity.insert("specVersion".to_owned(), self.spec_version.into());
-        entity.insert("description".to_owned(), self.description.into());
-        entity.insert("repository".to_owned(), self.repository.into());
-        entity.insert("schema".to_owned(), self.schema.into());
-        entity.insert("dataSources".to_owned(), data_source_ids.into());
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("specVersion", self.spec_version);
+        entity.set("description", self.description);
+        entity.set("repository", self.repository);
+        entity.set("schema", self.schema);
+        entity.set("dataSources", data_source_ids);
         ops.push(set_entity_operation(Self::TYPENAME, id, entity));
 
         ops
@@ -193,9 +388,12 @@ struct EthereumContractDataSourceEntity {
     mapping: EthereumContractMappingEntity,
 }
 
-impl EthereumContractDataSourceEntity {
-    pub const TYPENAME: &'static str = "EthereumContractDataSource";
+impl TypedEntity for EthereumContractDataSourceEntity {
+    const TYPENAME: &'static str = "EthereumContractDataSource";
+    type IdType = String;
+}
 
+impl EthereumContractDataSourceEntity {
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
         let mut ops = vec![];
 
@@ -205,18 +403,14 @@ impl EthereumContractDataSourceEntity {
         let mapping_id = format!("{}-mapping", id);
         ops.append(&mut self.mapping.write_operations(&mapping_id));
 
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.clone().into());
-        entity.insert("kind".to_owned(), self.kind.into());
-        entity.insert("network".to_owned(), self.network.into());
-        entity.insert("name".to_owned(), self.name.into());
-        entity.insert("source".to_owned(), source_id.into());
-        entity.insert("mapping".to_owned(), mapping_id.into());
-        ops.push(set_entity_operation(
-            Self::TYPENAME,
-            id,
-            entity,
-        ));
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("kind", self.kind);
+        entity.set("network", self.network);
+        entity.set("name", self.name);
+        entity.set("source", source_id);
+        entity.set("mapping", mapping_id);
+        ops.push(set_entity_operation(Self::TYPENAME, id, entity));
 
         ops
     }
@@ -240,14 +434,17 @@ struct EthereumContractSourceEntity {
     abi: String,
 }
 
-impl EthereumContractSourceEntity {
-    pub const TYPENAME: &'static str = "EthereumContractSource";
+impl TypedEntity for EthereumContractSourceEntity {
+    const TYPENAME: &'static str = "EthereumContractSource";
+    type IdType = String;
+}
 
+impl EthereumContractSourceEntity {
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.clone().into());
-        entity.insert("address".to_owned(), self.address.into());
-        entity.insert("abi".to_owned(), self.abi.into());
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("address", self.address);
+        entity.set("abi", self.abi);
         vec![set_entity_operation(Self::TYPENAME, id, entity)]
     }
 }
@@ -272,9 +469,12 @@ struct EthereumContractMappingEntity {
     event_handlers: Vec<EthereumContractEventHandlerEntity>,
 }
 
-impl EthereumContractMappingEntity {
-    pub const TYPENAME: &'static str = "EthereumContractMapping";
+impl TypedEntity for EthereumContractMappingEntity {
+    const TYPENAME: &'static str = "EthereumContractMapping";
+    type IdType = String;
+}
 
+impl EthereumContractMappingEntity {
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
         let mut ops = vec![];
 
@@ -292,22 +492,21 @@ impl EthereumContractMappingEntity {
             event_handler_ids.push(handler_id.into());
         }
 
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.clone().into());
-        entity.insert("kind".to_owned(), self.kind.into());
-        entity.insert("apiVersion".to_owned(), self.api_version.into());
-        entity.insert("language".to_owned(), self.language.into());
-        entity.insert("file".to_owned(), self.file.into());
-        entity.insert("abis".to_owned(), abi_ids.into());
-        entity.insert(
-            "entities".to_owned(),
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("kind", self.kind);
+        entity.set("apiVersion", self.api_version);
+        entity.set("language", self.language);
+        entity.set("file", self.file);
+        entity.set("abis", abi_ids);
+        entity.set(
+            "entities",
             self.entities
                 .into_iter()
                 .map(Value::from)
-                .collect::<Vec<Value>>()
-                .into(),
+                .collect::<Vec<Value>>(),
         );
-        entity.insert("eventHandlers".to_owned(), event_handler_ids.into());
+        entity.set("eventHandlers", event_handler_ids);
         ops.push(set_entity_operation(Self::TYPENAME, id, entity));
 
         ops
@@ -339,14 +538,17 @@ struct EthereumContractAbiEntity {
     file: String,
 }
 
-impl EthereumContractAbiEntity {
-    pub const TYPENAME: &'static str = "EthereumContractAbi";
+impl TypedEntity for EthereumContractAbiEntity {
+    const TYPENAME: &'static str = "EthereumContractAbi";
+    type IdType = String;
+}
 
+impl EthereumContractAbiEntity {
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.clone().into());
-        entity.insert("name".to_owned(), self.name.into());
-        entity.insert("file".to_owned(), self.file.into());
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("name", self.name);
+        entity.set("file", self.file);
         vec![set_entity_operation(Self::TYPENAME, id, entity)]
     }
 }
@@ -366,19 +568,18 @@ struct EthereumContractEventHandlerEntity {
     handler: String,
 }
 
-impl EthereumContractEventHandlerEntity {
-    pub const TYPENAME: &'static str = "EthereumContractEventHandler";
+impl TypedEntity for EthereumContractEventHandlerEntity {
+    const TYPENAME: &'static str = "EthereumContractEventHandler";
+    type IdType = String;
+}
 
+impl EthereumContractEventHandlerEntity {
     fn write_operations(self, id: &str) -> Vec<EntityOperation> {
-        let mut entity = HashMap::new();
-        entity.insert("id".to_owned(), id.clone().into());
-        entity.insert("event".to_owned(), self.event.into());
-        entity.insert("handler".to_owned(), self.handler.into());
-        vec![set_entity_operation(
-            Self::TYPENAME,
-            id,
-            entity,
-        )]
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("event", self.event);
+        entity.set("handler", self.handler);
+        vec![set_entity_operation(Self::TYPENAME, id, entity)]
     }
 }
 
@@ -403,6 +604,19 @@ fn set_entity_operation(
             entity_id: entity_id.into(),
         },
         data: data.into(),
+    }
+}
+
+fn remove_entity_operation(
+    entity_type_name: impl Into<String>,
+    entity_id: impl Into<String>,
+) -> EntityOperation {
+    EntityOperation::Remove {
+        key: EntityKey {
+            subgraph_id: SUBGRAPHS_ID.clone(),
+            entity_type: entity_type_name.into(),
+            entity_id: entity_id.into(),
+        },
     }
 }
 

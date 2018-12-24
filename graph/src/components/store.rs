@@ -80,6 +80,35 @@ pub struct EntityQuery {
     pub range: Option<EntityRange>,
 }
 
+impl EntityQuery {
+    pub fn new(subgraph_id: SubgraphId, entity_type: impl Into<String>) -> Self {
+        EntityQuery {
+            subgraph_id,
+            entity_type: entity_type.into(),
+            filter: None,
+            order_by: None,
+            order_direction: None,
+            range: None,
+        }
+    }
+
+    pub fn filter(mut self, filter: EntityFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    pub fn order_by(mut self, by: (String, ValueType), direction: EntityOrder) -> Self {
+        self.order_by = Some(by);
+        self.order_direction = Some(direction);
+        self
+    }
+
+    pub fn range(mut self, range: EntityRange) -> Self {
+        self.range = Some(range);
+        self
+    }
+}
+
 /// Operation types that lead to entity changes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -111,10 +140,21 @@ pub type EntityChangeStream = Box<Stream<Item = EntityChange, Error = ()> + Send
 /// An entity operation that can be transacted into the store.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntityOperation {
-    /// An entity is created or updated.
+    /// Locates the entity specified by `key` and sets its attributes according to the contents of
+    /// `data`.  If no entity exists with this key, creates a new entity.
     Set { key: EntityKey, data: Entity },
-    /// An entity is removed.
+
+    /// Removes an entity with the specified key, if one exists.
     Remove { key: EntityKey },
+
+    /// Aborts and rolls back the transaction unless `query` returns entities exactly matching
+    /// `entity_ids`.  Note that the equality test is sensitive to the order of the results, so
+    /// `query` should generally have its `order_by` and `order_direction` fields set to prevent
+    /// unnecessary rollbacks.
+    AbortUnless {
+        query: EntityQuery,
+        entity_ids: Vec<String>,
+    },
 }
 
 impl EntityOperation {
@@ -142,6 +182,7 @@ impl EntityOperation {
         match self {
             Set { ref key, .. } => key,
             Remove { ref key } => key,
+            AbortUnless { .. } => panic!("cannot get entity key from AbortUnless entity operation"),
         }
     }
 
@@ -173,6 +214,7 @@ impl EntityOperation {
                     .unwrap_or_else(|| data.clone()),
             ),
             Remove { .. } => None,
+            AbortUnless { .. } => panic!("cannot apply AbortUnless entity operation to an entity"),
         }
     }
 
@@ -197,6 +239,7 @@ impl EntityOperation {
                     entity
                 },
             },
+            AbortUnless { .. } => panic!("cannot merge AbortUnless entity operation"),
         }
     }
 
@@ -250,15 +293,6 @@ impl fmt::Display for EventSource {
 
 /// Common trait for store implementations.
 pub trait Store: Send + Sync + 'static {
-    /// Register a new subgraph ID in the store, and initialize the subgraph's block pointer to the
-    /// specified value.
-    /// Each subgraph has its own entities and separate block processing state.
-    fn add_subgraph_if_missing(
-        &self,
-        subgraph_id: SubgraphId,
-        block_ptr: EthereumBlockPointer,
-    ) -> Result<(), Error>;
-
     /// Get a pointer to the most recently processed block in the subgraph.
     fn block_ptr(&self, subgraph_id: SubgraphId) -> Result<EthereumBlockPointer, Error>;
 
@@ -321,28 +355,6 @@ pub trait Store: Send + Sync + 'static {
 }
 
 pub trait SubgraphDeploymentStore: Send + Sync + 'static {
-    /// List all deployment names and their associated subgraph IDs for the specified node ID.
-    fn read_by_node_id(
-        &self,
-        node_id: NodeId,
-    ) -> Result<Vec<(SubgraphDeploymentName, SubgraphId)>, Error>;
-
-    fn write(
-        &self,
-        name: SubgraphDeploymentName,
-        subgraph_id: SubgraphId,
-        node_id: NodeId,
-    ) -> Result<(), Error>;
-
-    fn read(&self, name: SubgraphDeploymentName) -> Result<Option<(SubgraphId, NodeId)>, Error>;
-
-    fn remove(&self, name: SubgraphDeploymentName) -> Result<bool, Error>;
-
-    fn deployment_events(
-        &self,
-        node_id: NodeId,
-    ) -> Box<Stream<Item = DeploymentEvent, Error = Error> + Send>;
-
     fn is_deployed(&self, id: &SubgraphId) -> Result<bool, Error>;
 
     fn subgraph_schema(&self, subgraph_id: SubgraphId) -> Result<Schema, Error>;

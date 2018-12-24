@@ -10,42 +10,42 @@ use jsonrpc_http_server::{
 };
 
 use std::collections::BTreeMap;
-use std::iter::FromIterator;
-use std::net::{Ipv4Addr, SocketAddrV4};
 use std::io;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 const JSON_RPC_DEPLOY_ERROR: i64 = 0;
 const JSON_RPC_REMOVE_ERROR: i64 = 1;
+const JSON_RPC_CREATE_ERROR: i64 = 2;
 const JSON_RPC_INTERNAL_ERROR: i64 = 3;
 
 #[derive(Debug, Deserialize)]
 struct SubgraphCreateParams {
-    name: SubgraphDeploymentName,
+    name: SubgraphName,
 }
 
 #[derive(Debug, Deserialize)]
 struct SubgraphDeployParams {
-    name: SubgraphDeploymentName,
+    name: SubgraphName,
     ipfs_hash: SubgraphId,
     node_id: Option<NodeId>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SubgraphRemoveParams {
-    name: SubgraphDeploymentName,
+    name: SubgraphName,
 }
 
-pub struct JsonRpcServer<P> {
-    provider: Arc<P>,
+pub struct JsonRpcServer<R> {
+    registrar: Arc<R>,
     http_port: u16,
     ws_port: u16,
     node_id: NodeId,
     logger: Logger,
 }
 
-impl<P> JsonRpcServer<P>
+impl<R> JsonRpcServer<R>
 where
-    P: SubgraphRegistrar,
+    R: SubgraphRegistrar,
 {
     /// Handler for the `subgraph_create` endpoint.
     fn create_handler(
@@ -57,17 +57,17 @@ where
         info!(logger, "Received subgraph_create request"; "params" => format!("{:?}", params));
 
         Box::new(
-            self.provider
-                .deploy(params.name, params.ipfs_hash, node_id)
+            self.registrar
+                .create_subgraph(params.name)
                 .map_err(move |e| {
-                    if let SubgraphDeploymentProviderError::Unknown(e) = e {
-                        error!(logger, "subgraph_deploy failed: {}", e);
-                        json_rpc_error(JSON_RPC_DEPLOY_ERROR, "internal error".to_owned())
+                    if let SubgraphRegistrarError::Unknown(e) = e {
+                        error!(logger, "subgraph_create failed: {}", e);
+                        json_rpc_error(JSON_RPC_CREATE_ERROR, "internal error".to_owned())
                     } else {
-                        json_rpc_error(JSON_RPC_DEPLOY_ERROR, e.to_string())
+                        json_rpc_error(JSON_RPC_CREATE_ERROR, e.to_string())
                     }
                 })
-                .map(move |_| routes),
+                .map(move |_| Value::Null),
         )
     }
 
@@ -84,10 +84,10 @@ where
         let routes = subgraph_routes(&params.name, self.http_port, self.ws_port);
 
         Box::new(
-            self.provider
-                .deploy(params.name, params.ipfs_hash, node_id)
+            self.registrar
+                .create_subgraph_version(params.name, params.ipfs_hash, node_id)
                 .map_err(move |e| {
-                    if let SubgraphDeploymentProviderError::Unknown(e) = e {
+                    if let SubgraphRegistrarError::Unknown(e) = e {
                         error!(logger, "subgraph_deploy failed: {}", e);
                         json_rpc_error(JSON_RPC_DEPLOY_ERROR, "internal error".to_owned())
                     } else {
@@ -108,10 +108,10 @@ where
         info!(logger, "Received subgraph_remove request"; "params" => format!("{:?}", params));
 
         Box::new(
-            self.provider
-                .remove(params.name)
+            self.registrar
+                .remove_subgraph(params.name)
                 .map_err(move |e| {
-                    if let SubgraphDeploymentProviderError::Unknown(e) = e {
+                    if let SubgraphRegistrarError::Unknown(e) = e {
                         error!(logger, "subgraph_remove failed: {}", e);
                         json_rpc_error(JSON_RPC_REMOVE_ERROR, "internal error".to_owned())
                     } else {
@@ -125,29 +125,34 @@ where
 
     /// Handler for the `subgraph_list` endpoint.
     ///
-    /// Returns the names and ids of deployed subgraphs.
-    fn list_handler(&self) -> Result<Value, jsonrpc_core::Error> {
+    /// Returns the names of deployed subgraphs.
+    fn list_handler(&self) -> Box<Future<Item = Value, Error = jsonrpc_core::Error> + Send> {
         let logger = self.logger.clone();
 
         info!(logger, "Received subgraph_list request");
 
-        let list = self
-            .provider
-            .list()
-            .map_err(move |e| {
-                error!(logger, "Failed to list subgraphs: {}", e);
-                json_rpc_error(JSON_RPC_INTERNAL_ERROR, "database error".to_owned())
-            })?
-            .into_iter()
-            .map(|(name, id)| (name.to_string(), Value::String(id.to_string())));
-
-        Ok(Value::from(serde_json::Map::from_iter(list)))
+        Box::new(
+            self.registrar
+                .list_subgraphs()
+                .map_err(move |e| {
+                    error!(logger, "Failed to list subgraphs: {}", e);
+                    json_rpc_error(JSON_RPC_INTERNAL_ERROR, "database error".to_owned())
+                })
+                .map(|names| {
+                    Value::from(
+                        names
+                            .into_iter()
+                            .map(|name| name.to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                }),
+        )
     }
 }
 
-impl<P> JsonRpcServerTrait<P> for JsonRpcServer<P>
+impl<R> JsonRpcServerTrait<R> for JsonRpcServer<R>
 where
-    P: SubgraphRegistrar,
+    R: SubgraphRegistrar,
 {
     type Server = Server;
 
@@ -155,7 +160,7 @@ where
         port: u16,
         http_port: u16,
         ws_port: u16,
-        provider: Arc<P>,
+        registrar: Arc<R>,
         node_id: NodeId,
         logger: Logger,
     ) -> Result<Self::Server, io::Error> {
@@ -171,7 +176,7 @@ where
         let mut handler = IoHandler::with_compatibility(Compatibility::Both);
 
         let arc_self = Arc::new(JsonRpcServer {
-            provider,
+            registrar,
             http_port,
             ws_port,
             node_id,
@@ -236,7 +241,7 @@ pub fn parse_response(response: Value) -> Result<(), jsonrpc_core::Error> {
     }
 }
 
-fn subgraph_routes(name: &SubgraphDeploymentName, http_port: u16, ws_port: u16) -> Value {
+fn subgraph_routes(name: &SubgraphName, http_port: u16, ws_port: u16) -> Value {
     let mut map = BTreeMap::new();
     map.insert("playground", format!(":{}/name/{}", http_port, name));
     map.insert("queries", format!(":{}/name/{}/graphql", http_port, name));
